@@ -3,16 +3,18 @@ import numpy as np
 from scipy.integrate import trapezoid
 
 # Параметры сигнала
-F_DISCR = 100  # Количество точек дискретизации [рекомендуется: 500-2000]
+F_DISCR = 200  # Количество точек дискретизации [рекомендуется: 200-2000]
 SINC_WIDTH = 1.0  # Ширина sinc-функции [рекомендуется: 0.5-2.0]
 TIME_RANGE = 10.0  # Диапазон времени [-TIME_RANGE, TIME_RANGE]
 # Параметры интерполяции
 KERNEL_SIZE = 8  # Размер ядра [рекомендуется: 6-12, должно быть четным]
 SUBSAMPLES = 16  # Количество подвыборок [рекомендуется: 8-32]
-INTERP_FACTOR = 10  # Коэффициент интерполяции [рекомендуется: 5-20]
+INTERP_FACTOR = 10  # Коэффициент интерполяции [рекомендуется: 2-10]
 # Параметры анализа
 THRESHOLD_DB = -3  # Уровень для определения ширины лепестка [дБ]
 MAIN_LOBE_SEARCH_RADIUS = 2.0  # Радиус поиска главного лепестка
+THEORETICAL_CLASSICAL_PSLR = -13.26  # Классический УБЛ [дБ]
+THEORETICAL_INTEGRAL_PSLR = -10.96   # Интегральный УБЛ [дБ]
 
 #Генерация нормированного sinc-сигнала с заданной шириной
 def generate_sinc_signal():
@@ -158,13 +160,13 @@ def find_main_lobe_width(t, signal_db):
     return wl, wr, width, left_points, right_points
 
 #Вычисление УБЛ
-def calculate_sidelobe_levels(t, signal_db, wl, wr):
+def calculate_sidelobe_levels(t, signal_db, SINC_WIDTH):
 
     # Конвертируем в линейную область для анализа мощности
     signal_linear = 10 ** (signal_db / 20)
 
     # Маска для главного лепестка
-    main_lobe_mask = (t >= wl) & (t <= wr)
+    main_lobe_mask = (t >= -SINC_WIDTH) & (t <= SINC_WIDTH)
 
     # Главный лепесток
     main_lobe = signal_linear[main_lobe_mask]
@@ -191,7 +193,6 @@ def calculate_sidelobe_levels(t, signal_db, wl, wr):
     return classical_pslr_db, integral_pslr_db
 
 #Визуализация
-
 def plot_results(t_original, sinc_db, t_interp, sinc_interp, wl, wr, width, left_points, right_points):
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
 
@@ -204,7 +205,7 @@ def plot_results(t_original, sinc_db, t_interp, sinc_interp, wl, wr, width, left
     ax1.legend()
     ax1.grid(True, alpha=0.3)
     ax1.set_ylim(-50, 5)
-    ax1.set_xlim(-3, 3)
+    ax1.set_xlim(-10, 10)
 
     # 2. Детальный вид точек пересечения
     if wl is not None and wr is not None and left_points and right_points:
@@ -292,19 +293,25 @@ def main():
     theoretical_width = theoretical_sinc_width(SINC_WIDTH)
 
     print(f"\nРЕЗУЛЬТАТЫ ИЗМЕРЕНИЙ:")
-    print(f"Теоретическое разрешение: {theoretical_width:.6f}")
+    print(f"\nТеоретическое разрешение: {theoretical_width:.6f}")
     if width is not None:
         print(f"Измеренное разрешение:  {width:.6f}")
-        error = abs(width - theoretical_width) / theoretical_width * 100
-        print(f"Погрешность:  {error:.2f}%")
+        error_width = abs(width - theoretical_width) / theoretical_width * 100
+        print(f"Погрешность измерения разрешения:  {error_width:.2f}%")
     else:
         print("Не удалось определить ширину лепестка")
         width = 0
 
     if wl is not None and wr is not None:
-        classical_pslr, integral_pslr = calculate_sidelobe_levels(t_interp, sinc_interp, wl, wr)
-        print(f"Классический УБЛ:   {classical_pslr:.2f} дБ")
-        print(f"Интегральный УБЛ:   {integral_pslr:.2f} дБ")
+        classical_pslr, integral_pslr = calculate_sidelobe_levels(t_interp, sinc_interp, SINC_WIDTH)
+        print(f"\nТеоретический классический УБЛ: {THEORETICAL_CLASSICAL_PSLR:.2f} дБ")
+        print(f"Измеренный классический УБЛ:   {classical_pslr:.2f} дБ")
+        error_classical_pslr = abs(classical_pslr - THEORETICAL_CLASSICAL_PSLR)
+        print(f"Погрешность измерения классического УБЛ:  {error_classical_pslr:.2f}дБ")
+        print(f"\nТеоретический интегральный УБЛ: {THEORETICAL_INTEGRAL_PSLR:.2f} дБ")
+        print(f"Измеренный интегральный УБЛ:   {integral_pslr:.2f} дБ")
+        error_integral_pslr = abs(integral_pslr - THEORETICAL_INTEGRAL_PSLR)
+        print(f"Погрешность измерения интегрального УБЛ:  {error_integral_pslr:.2f}дБ")
     else:
         classical_pslr = integral_pslr = -80
         print("Не удалось вычислить УБЛ (не определены границы главного лепестка)")
