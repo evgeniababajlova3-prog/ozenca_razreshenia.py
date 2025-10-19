@@ -51,7 +51,7 @@ def sinc_interpolation(t_original, signal_db, kernel_size, subsamples, time_rang
         points = signal_linear[start_idx:end_idx]
         signal_interp[i] = np.sum(points * coeffs)
 
-    # Преобразуем обратно в дБ
+    # Преобразуем обратно
     signal_interp_db = 20 * np.log10(np.abs(signal_interp))
 
     return t_interp, signal_interp_db

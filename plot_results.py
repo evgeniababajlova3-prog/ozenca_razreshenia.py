@@ -1,7 +1,7 @@
 import matplotlib.pyplot as plt
 import numpy as np
 
-def plot_results(t_original, sinc_db, t_interp, sinc_interp, wl, wr, width, left_points, right_points, threshold_db):
+def plot_results(t_original, sinc_db, t_interp, sinc_interp, wl, wr, width, left_points, right_points):
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
 
     # 1. Исходный и интерполированный сигнал
@@ -24,7 +24,7 @@ def plot_results(t_original, sinc_db, t_interp, sinc_interp, wl, wr, width, left
 
         # Рисуем интерполированный сигнал
         ax2.plot(t_zoom, sinc_zoom, 'g-', linewidth=2, alpha=0.7, label='Интерполированный сигнал')
-        ax2.axhline(y=threshold_db, color='r', linestyle='--', linewidth=2, label=f'Уровень {threshold_db} дБ')
+        ax2.axhline(y=-3, color='r', linestyle='--', linewidth=2, label=f'Уровень 3 дБ')
 
 
     # Левая сторона - точки и прямая
@@ -41,7 +41,7 @@ def plot_results(t_original, sinc_db, t_interp, sinc_interp, wl, wr, width, left
 
         ax2.plot(t_left_extended, y_left_extended, 'b--', linewidth=2)
         ax2.plot(left_t, left_y, 'bo', markersize=6)
-        ax2.plot(wl, threshold_db, 'mo', markersize=8)
+        ax2.plot(wl, -3, 'mo', markersize=8)
 
     # Правая сторона - точки и прямая
         right_t = [p[0] for p in right_points]
@@ -57,17 +57,17 @@ def plot_results(t_original, sinc_db, t_interp, sinc_interp, wl, wr, width, left
 
         ax2.plot(t_right_extended, y_right_extended, 'b--', linewidth=2, label='Интерполяционные прямые')
         ax2.plot(right_t, right_y, 'bo', markersize=6, label='Точки вблизи точки пересечения')
-        ax2.plot(wr, threshold_db, 'mo', markersize=8, label='Точки пересечения')
+        ax2.plot(wr, -3, 'mo', markersize=8, label='Точки пересечения')
 
     # Показываем ширину
-        ax2.plot([wl, wr], [threshold_db, threshold_db], 'm-', linewidth=3, alpha=0.7, label=f'Ширина: {width:.4f}')
+        ax2.plot([wl, wr], [-3, -3], 'm-', linewidth=3, alpha=0.7, label=f'Ширина: {width:.4f}')
 
         ax2.set_xlabel('t')
         ax2.set_ylabel('Амплитуда (дБ)')
         ax2.set_title('Детальный вид точек пересечения')
         ax2.legend()
         ax2.grid(True, alpha=0.3)
-        ax2.set_ylim(threshold_db - 1, threshold_db + 1)
+        ax2.set_ylim(-3 - 1, -3 + 1)
     else:
         ax2.text(0.5, 0.5, 'Не удалось определить\nграницы лепестка',
              horizontalalignment='center', verticalalignment='center',

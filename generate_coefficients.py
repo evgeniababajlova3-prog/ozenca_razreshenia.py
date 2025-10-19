@@ -12,7 +12,7 @@ def generate_coefficients(kernel_size, subsamples):
 
         for k in range(kernel_size):
             # Позиция точки относительно центра интерполяции
-            # Центр ядра находится между точками при kernel_size четном
+            # Центр ядра находится между точками при четном kernel_size
             pos = (k - kernel_size // 2 + 0.5) - shift
 
             # Вычисляем sinc функцию

@@ -13,27 +13,17 @@ KERNEL_SIZE = 8  # Размер ядра [рекомендуется: 6-12, до
 SUBSAMPLES = 16  # Количество подвыборок [рекомендуется: 8-32]
 INTERP_FACTOR = 10  # Коэффициент интерполяции [рекомендуется: 2-10]
 # Параметры анализа
-THRESHOLD_DB = -3  # Уровень для определения ширины лепестка [дБ]
-MAIN_LOBE_SEARCH_RADIUS = 2.0  # Радиус поиска главного лепестка
 THEORETICAL_CLASSICAL_PSLR = -13.26  # Классический УБЛ [дБ]
 THEORETICAL_INTEGRAL_PSLR = -10.96   # Интегральный УБЛ [дБ]
 
 #Основная функция
-def analiz_sechenia(t_original, sinc_db, sinc_linear):
-
-    # Исходные данные
-    print("\nИСХОДНЫЕ ДАННЫЕ:")
-    print(f"Количество точек: {F_DISCR}")
-    print(f"Ширина sinc-функции: {SINC_WIDTH}")
-    print(f"Размер ядра: {KERNEL_SIZE}")
-    print(f"Количество фаз: {SUBSAMPLES}")
-    print(f"Коэффициент интерполяции: {INTERP_FACTOR}")
+def analiz_sechenia(t_original, sinc_db):
 
     #Sinc-интерполяция
     t_interp, sinc_interp = sinc_interpolation(t_original, sinc_db, KERNEL_SIZE, SUBSAMPLES, TIME_RANGE, F_DISCR, INTERP_FACTOR)
 
     #Нахождение ширины главного лепестка
-    wl, wr, width, left_points, right_points = find_main_lobe_width(t_interp, sinc_interp, THRESHOLD_DB)
+    wl, wr, width, left_points, right_points = find_main_lobe_width(t_interp, sinc_interp)
 
     # Теоретическое значение
     theoretical_width = theoretical_sinc_width(SINC_WIDTH)
@@ -49,7 +39,7 @@ def analiz_sechenia(t_original, sinc_db, sinc_linear):
         width = 0
 
     if wl is not None and wr is not None:
-        classical_pslr, integral_pslr = calculate_sidelobe_levels(t_interp, sinc_interp, SINC_WIDTH)
+        classical_pslr, integral_pslr = calculate_sidelobe_levels(t_interp, sinc_interp)
         print(f"\nТеоретический классический УБЛ: {THEORETICAL_CLASSICAL_PSLR:.2f} дБ")
         print(f"Измеренный классический УБЛ:   {classical_pslr:.2f} дБ")
         error_classical_pslr = abs(classical_pslr - THEORETICAL_CLASSICAL_PSLR)
@@ -63,7 +53,7 @@ def analiz_sechenia(t_original, sinc_db, sinc_linear):
         print("Не удалось вычислить УБЛ (не определены границы главного лепестка)")
 
     # 5. Визуализация
-    plot_results(t_original, sinc_db, t_interp, sinc_interp, wl, wr, width, left_points, right_points, THRESHOLD_DB)
+    plot_results(t_original, sinc_db, t_interp, sinc_interp, wl, wr, width, left_points, right_points)
 
 
     return {
