@@ -444,4 +444,73 @@ def main():
 main()
 
 
+import numpy as np
+from scipy import stats
 
+def generate_radar_image_with_snr(targets, image_size, lobe_width_X, lobe_width_Y, discr_param, snr_db=20):
+    """Генерация РЛИ с гауссовским шумом заданного SNR."""
+    clean_image = np.zeros(image_size)
+    for target in targets:
+        x, y = target
+        sinc_target = generate_2d_sinc(x, y, image_size, lobe_width_X, lobe_width_Y, discr_param)
+        clean_image += sinc_target
+    
+    signal_power = np.mean(clean_image**2)
+    noise_power = signal_power / (10**(snr_db/10))
+    noise_std = np.sqrt(noise_power)
+    
+    gaussian_noise = np.random.normal(0, noise_std, image_size)
+    radar_image = clean_image + gaussian_noise
+    
+    return radar_image, noise_std
+
+def find_noise_region_simple(radar_image, expected_std, tolerance_db=3, num_samples=50):
+    """Поиск шумовой области по соответствию стандартного отклонения."""
+    h, w = radar_image.shape
+    window_size = (32, 32)
+    window_h, window_w = window_size
+    
+    tolerance_linear = 10**(tolerance_db/20)
+    
+    for _ in range(num_samples):
+        y = np.random.randint(0, h - window_h)
+        x = np.random.randint(0, w - window_w)
+        
+        region = radar_image[y:y+window_h, x:x+window_w]
+        region_std = np.std(region)
+        
+        # Проверяем соответствие стандартного отклонения
+        if abs(region_std - expected_std) / expected_std <= (tolerance_linear - 1):
+            return region_std
+    
+    # Если не нашли - используем ожидаемое значение
+    return expected_std
+
+def calculate_noise_threshold_simple(radar_image, expected_std, x_db=10):
+    """Простой расчет порога через SNR."""
+    # Ищем шумовую область
+    measured_std = find_noise_region_simple(radar_image, expected_std)
+    
+    # Порог = уровень_шума + X дБ
+    noise_level_db = 20 * np.log10(measured_std + 1e-12)
+    threshold_db = noise_level_db + x_db
+    threshold_linear = 10**(threshold_db/20)
+    
+    print(f"Уровень шума: {measured_std:.6f} ({noise_level_db:.2f} дБ)")
+    print(f"Порог: {threshold_linear:.6f} ({threshold_db:.2f} дБ)")
+    
+    return threshold_linear
+
+# В основной функции:
+def main():
+    SNR_DB = 20
+    X_DB = 10
+    
+    # Генерация с шумом
+    radar_image, expected_std = generate_radar_image_with_snr(
+        TARGETS, IMAGE_SIZE, SINC_WIDTH_X, SINC_WIDTH_Y, DISCR_PARAM, snr_db=SNR_DB)
+    
+    # Порог
+    noise_threshold = calculate_noise_threshold_simple(radar_image, expected_std, x_db=X_DB)
+    
+    # Дальше твой существующий код...
