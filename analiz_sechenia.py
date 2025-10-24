@@ -1,12 +1,10 @@
 from sinc_interpolation import sinc_interpolation
-from theoretical_sinc_width import theoretical_sinc_width
 from find_main_lobe_width import find_main_lobe_width
 from calculate_sidelobe_levels import calculate_sidelobe_levels
 from plot_results import plot_results
 
 # Параметры сигнала
 F_DISCR = 200  # Количество точек дискретизации [рекомендуется: 200-2000]
-SINC_WIDTH = 1.0  # Ширина sinc-функции [рекомендуется: 0.5-2.0]
 TIME_RANGE = 10.0  # Диапазон времени [-TIME_RANGE, TIME_RANGE]
 # Параметры интерполяции
 KERNEL_SIZE = 8  # Размер ядра [рекомендуется: 6-12, должно быть четным]
@@ -25,39 +23,22 @@ def analiz_sechenia(t_original, sinc_db):
     #Нахождение ширины главного лепестка
     wl, wr, width, left_points, right_points = find_main_lobe_width(t_interp, sinc_interp)
 
-    # Теоретическое значение
-    theoretical_width = theoretical_sinc_width(SINC_WIDTH)
-
     print(f"\nРЕЗУЛЬТАТЫ ИЗМЕРЕНИЙ:")
-    print(f"\nТеоретическое разрешение: {theoretical_width:.6f}")
     if width is not None:
-        print(f"Измеренное разрешение:  {width:.6f}")
-        error_width = abs(width - theoretical_width) / theoretical_width * 100
-        print(f"Погрешность измерения разрешения:  {error_width:.2f}%")
-    else:
-        print("Не удалось определить ширину лепестка")
-        width = 0
+        print(f"Ширина главного лепестка:  {width:.3f}")
 
     if wl is not None and wr is not None:
         classical_pslr, integral_pslr = calculate_sidelobe_levels(t_interp, sinc_interp)
-        print(f"\nТеоретический классический УБЛ: {THEORETICAL_CLASSICAL_PSLR:.2f} дБ")
-        print(f"Измеренный классический УБЛ:   {classical_pslr:.2f} дБ")
-        error_classical_pslr = abs(classical_pslr - THEORETICAL_CLASSICAL_PSLR)
-        print(f"Погрешность измерения классического УБЛ:  {error_classical_pslr:.2f}дБ")
-        print(f"\nТеоретический интегральный УБЛ: {THEORETICAL_INTEGRAL_PSLR:.2f} дБ")
-        print(f"Измеренный интегральный УБЛ:   {integral_pslr:.2f} дБ")
-        error_integral_pslr = abs(integral_pslr - THEORETICAL_INTEGRAL_PSLR)
-        print(f"Погрешность измерения интегрального УБЛ:  {error_integral_pslr:.2f}дБ")
+        print(f"Максимальный УБЛ:   {classical_pslr:.2f} дБ")
+        print(f"Интегральный УБЛ:   {integral_pslr:.2f} дБ")
     else:
         classical_pslr = integral_pslr = -80
         print("Не удалось вычислить УБЛ (не определены границы главного лепестка)")
 
     # 5. Визуализация
-    plot_results(t_original, sinc_db, t_interp, sinc_interp, wl, wr, width, left_points, right_points)
-
+    plot_results(t_original, sinc_db, t_interp, sinc_interp, wl, wr, width, classical_pslr)
 
     return {
-        'theoretical_width': theoretical_width,
         'measured_width': width,
         'classical_pslr': classical_pslr,
         'integral_pslr': integral_pslr

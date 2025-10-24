@@ -54,8 +54,8 @@ def calculate_sidelobe_levels(t, signal_db):
 
     # Интегральный УБЛ - отношение мощностей
     if len(main_lobe) > 0 and len(sidelobes) > 0:
-        power_main = np.trapezoid(main_lobe ** 2, t_main)
-        power_sidelobes = np.trapezoid(sidelobes ** 2, t_sidelobes)
+        power_main = trapezoid(main_lobe ** 2, t_main)
+        power_sidelobes = trapezoid(sidelobes ** 2, t_sidelobes)
         integral_pslr_db = 10 * np.log10(power_sidelobes / power_main)
     else:
         integral_pslr_db = -80
