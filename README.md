@@ -1,5 +1,159 @@
 import numpy as np
 from scipy import ndimage
+
+def generate_radar_image(targets, image_size, lobe_width_X, lobe_width_Y, discr_param, snr_db=20):
+    """Генерирует РЛИ с комплексным гауссовским шумом."""
+    radar_image = np.zeros(image_size, dtype=complex)
+    
+    for target in targets:
+        x, y = target
+        sinc_target = generate_2d_sinc(x, y, image_size, lobe_width_X, lobe_width_Y, discr_param)
+        radar_image += sinc_target
+    
+    peak_signal_power = np.max(np.abs(radar_image))**2
+    noise_power = peak_sower / (10**(snr_db/10))
+    noise_std = np.sqrt(noise_power / 2)
+    noise_real = np.random.normal(0, noise_std, image_size)
+    noise_imag = np.random.normal(0, noise_std, image_size)
+    complex_noise = noise_real + 1j * noise_imag
+    
+    radar_image_with_noise = radar_image + complex_noise
+    return radar_image_with_noise  # Возвращаем комплексное изображение
+
+def check_rayleigh_amplitude(amplitudes):
+    """Проверяет, соответствуют ли амплитуды распределению Релея."""
+    if len(amplitudes) < 50:
+        return False, float('inf')
+    
+    mean_val = np.mean(amplitudes)
+    std_val = np.std(amplitudes)
+    
+    if mean_val < 1e-12:
+        return False, float('inf')
+    
+    # Для распределения Релея: mean = σ * sqrt(π/2), std = σ * sqrt(2 - π/2)
+    # Отношение std/mean должно быть постоянным: sqrt((2 - π/2)/(π/2)) ≈ 0.5227
+    expected_ratio = np.sqrt((2 - np.pi/2) / (np.pi/2))
+    current_ratio = std_val / mean_val
+    
+    ratio_diff = abs(current_ratio - expected_ratio)
+    
+    # Вычисляем параметр σ двумя способами
+    sigma_from_mean = mean_val / np.sqrt(np.pi/2)
+    sigma_from_std = std_val / np.sqrt(2 - np.pi/2)
+    sigma_diff = abs(sigma_from_mean - sigma_from_std) / ((sigma_from_mean + sigma_from_std)/2)
+    
+    # Комбинированная мера соответствия
+    match_quality = ratio_diff + sigma_diff
+    
+    # Считаем, что распределение соответствует Релею, если match_quality < 0.3
+    return match_quality < 0.3, match_quality
+
+def check_uniform_phase(phases):
+    """Проверяет, равномерно ли распределены фазы."""
+    if len(phases) < 50:
+        return False, float('inf')
+    
+    # Нормализуем фазы к диапазону [0, 2π]
+    phases_normalized = phases % (2 * np.pi)
+    
+    # Разбиваем на бины и проверяем равномерность
+    n_bins = 12
+    hist, bin_edges = np.histogram(phases_normalized, bins=n_bins, range=(0, 2*np.pi))
+    
+    # Для равномерного распределения все бины должны иметь примерно одинаковое количество элементов
+    expected_count = len(phases) / n_bins
+    chi_squared = np.sum((hist - expected_count)**2 / expected_count)
+    
+    # Нормализуем хи-квадрат
+    normalized_chi = chi_squared / n_bins
+    
+    # Считаем, что распределение равномерное, если normalized_chi < 0.5
+    return normalized_chi < 0.5, normalized_chi
+
+def find_rayleigh_uniform_region(radar_image_complex, window_size=(50, 50), num_samples=100):
+    """Находит область, где амплитуды распределены по Релею, а фазы равномерно."""
+    h, w = radar_image_complex.shape
+    window_h, window_w = window_size
+    
+    best_match = float('inf')
+    best_window_complex = None
+    best_amplitudes = None
+    best_phases = None
+    
+    for _ in range(num_samples):
+        y_start = np.random.randint(0, h - window_h)
+        x_start = np.random.randint(0, w - window_w)
+        
+        window_complex = radar_image_complex[y_start:y_start+window_h, x_start:x_start+window_w]
+        
+        # Извлекаем амплитуды и фазы
+        amplitudes = np.abs(window_complex).flatten()
+        phases = np.angle(window_complex).flatten()
+        
+        # Пропускаем окна с явными целями (слишком высокие амплитуды)
+        if np.max(amplitudes) > np.percentile(np.abs(radar_image_complex), 70):
+            continue
+            
+        # Проверяем распределение амплитуд
+        is_rayleigh, ray_match_quality = check_rayleigh_amplitude(amplitudes)
+        
+        # Проверяем распределение фаз
+        is_uniform, uniform_match_quality = check_uniform_phase(phases)
+        
+        # Комбинированная мера соответствия
+        if is_rayleigh and is_uniform:
+            match_quality = ray_match_quality + uniform_match_quality
+            
+            if match_quality < best_match:
+                best_match = match_quality
+                best_window_complex = window_complex
+                best_amplitudes = amplitudes
+                best_phases = phases
+    
+    return best_window_complex, best_amplitudes, best_phases, best_match
+
+def calculate_noise_threshold(radar_image_complex, x_db=10):
+    """Расчет порога на основе мощности шума в области с распределением Релея и равномерными фазами."""
+    # Находим шумовую область
+    noise_window, amplitudes, phases, match_quality = find_rayleigh_uniform_region(radar_image_complex)
+    
+    if noise_window is None:
+        # Если не нашли область с нужными распределениями, используем более простой метод
+        amplitudes_full = np.abs(radar_image_complex).flatten()
+        # Исключаем самые яркие пиксели (возможные цели)
+        noise_power = np.percentile(amplitudes_full**2, 15)
+    else:
+        # Вычисляем мощность шума
+        noise_power = np.mean(amplitudes**2)
+    
+    # Вычисляем среднеквадратичное значение шума
+    noise_rms = np.sqrt(noise_power)
+    
+    # Устанавливаем порог
+    threshold_db = 20 * np.log10(noise_rms + 1e-12) + x_db
+    threshold_linear = 10**(threshold_db/20)
+    
+    return threshold_linear
+
+def find_targets(radar_image_complex, min_distance, lobe_width_X, lobe_width_Y, discr_param, threshold_offset_db=10):
+    """Обнаружение целей."""
+    # Получаем амплитудное изображение
+    radar_image_amplitude = np.abs(radar_image_complex)
+    
+    # Вычисляем порог
+    threshold = calculate_noise_threshold(radar_image_complex, threshold_offset_db)
+    
+    # Находим локальные максимумы
+    local_max = ndimage.maximum_filter(radar_image_amplitude, size=min_distance) == radar_image_amplitude
+    above_threshold = radar_image_amplitude > threshold
+    detected = local_max & above_threshold
+    
+    peaks = np.where(detected)
+    peaks_coords = list(zip(peaks[0], peaks[1]))
+    
+    return peaks_coordsimport numpy as np
+from scipy import ndimage
 from scipy.stats import rayleigh
 import matplotlib.pyplot as plt
 
