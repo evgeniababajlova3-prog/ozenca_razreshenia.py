@@ -1,4 +1,162 @@
 import numpy as np
+from scipy import ndimage
+from scipy.stats import rayleigh
+import matplotlib.pyplot as plt
+
+def generate_radar_image(targets, image_size, lobe_width_X, lobe_width_Y, discr_param, snr_db=20):
+    """
+    Генерирует РЛИ с комплексным гауссовским шумом заданного SNR.
+    """
+    radar_image = np.zeros(image_size, dtype=complex)
+    
+    # Генерируем чистый сигнал (цели)
+    for target in targets:
+        x, y = target
+        sinc_target = generate_2d_sinc(x, y, image_size, lobe_width_X, lobe_width_Y, discr_param)
+        radar_image += sinc_target
+    
+    # Вычисляем мощность пикового сигнала
+    peak_signal_power = np.max(np.abs(radar_image))**2
+    
+    # Вычисляем мощность шума на основе SNR
+    noise_power = peak_signal_power / (10**(snr_db/10))
+    
+    # Генерируем комплексный гауссовский шум
+    noise_std = np.sqrt(noise_power / 2)  # делим на 2 для комплексного шума
+    noise_real = np.random.normal(0, noise_std, image_size)
+    noise_imag = np.random.normal(0, noise_std, image_size)
+    complex_noise = noise_real + 1j * noise_imag
+    
+    # Добавляем шум к сигналу
+    radar_image_with_noise = radar_image + complex_noise
+    
+    return np.abs(radar_image_with_noise)
+
+def find_rayleigh_noise_region(radar_image, window_size=(50, 50), num_samples=100):
+    """
+    Находит область с распределением, наиболее близким к распределению Релея.
+    Критерий: минимальное расстояние Колмогорова-Смирнова до распределения Релея.
+    """
+    h, w = radar_image.shape
+    window_h, window_w = window_size
+    
+    best_ks_stat = float('inf')
+    best_window = None
+    best_coords = (0, 0)
+    best_scale = 0
+    
+    for _ in range(num_samples):
+        y_start = np.random.randint(0, h - window_h)
+        x_start = np.random.randint(0, w - window_w)
+        
+        window = radar_image[y_start:y_start+window_h, x_start:x_start+window_w].flatten()
+        
+        # Исключаем окна с явными целями (слишком высокие значения)
+        if np.max(window) > np.percentile(radar_image, 90):
+            continue
+            
+        # Оцениваем параметр масштаба для распределения Релея
+        # Для распределения Релея: scale = sqrt(mean(window**2) / 2)
+        scale_estimate = np.sqrt(np.mean(window**2) / 2)
+        
+        # Проверяем гипотезу о распределении Релея с помощью KS-теста
+        from scipy.stats import kstest
+        ks_stat, p_value = kstest(window, 'rayleigh', args=(scale_estimate,))
+        
+        # Ищем окно с наименьшей KS-статистикой (наиболее близкое к распределению Релея)
+        if ks_stat < best_ks_stat and p_value > 0.05:  # p-value > 0.05 означает, что распределение похоже на Релея
+            best_ks_stat = ks_stat
+            best_window = window
+            best_coords = (y_start, x_start)
+            best_scale = scale_estimate
+    
+    return best_window, best_coords, best_ks_stat, best_scale
+
+def plot_rayleigh_comparison(noise_window, scale, coords):
+    """Визуализация сравнения распределения в окне с распределением Релея."""
+    plt.figure(figsize=(10, 6))
+    
+    # Гистограмма данных
+    plt.hist(noise_window, bins=30, density=True, alpha=0.7, label='Данные из окна')
+    
+    # Теоретическое распределение Релея
+    x = np.linspace(0, np.max(noise_window), 100)
+    rayleigh_pdf = rayleigh.pdf(x, scale=scale)
+    plt.plot(x, rayleigh_pdf, 'r-', linewidth=2, label=f'Распределение Релея (scale={scale:.4f})')
+    
+    plt.title(f'Сравнение с распределением Релея (координаты {coords})')
+    plt.xlabel('Амплитуда')
+    plt.ylabel('Плотность вероятности')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.show()
+
+def calculate_noise_threshold(radar_image, x_db=10):
+    """
+    Расчет порога обнаружения на основе мощности шума в области с распределением Релея.
+    """
+    # Находим область с распределением Релея
+    noise_window, noise_coords, ks_stat, scale = find_rayleigh_noise_region(radar_image)
+    
+    if noise_window is None:
+        # Резервный метод
+        noise_power = np.percentile(radar_image**2, 10)  # 10-й перцентиль мощности
+        print(f"Область с распределением Релея не найдена, используем 10-й перцентиль мощности: {noise_power:.6f}")
+    else:
+        # Вычисляем мощность шума (средний квадрат амплитуды)
+        noise_power = np.mean(noise_window**2)
+        print(f"Найдена область с распределением Релея: координаты {noise_coords}")
+        print(f"KS-статистика: {ks_stat:.4f}, параметр масштаба: {scale:.4f}")
+        print(f"Мощность шума: {noise_power:.6f}")
+        
+        # Визуализируем сравнение с распределением Релея
+        plot_rayleigh_comparison(noise_window, scale, noise_coords)
+    
+    # Вычисляем среднеквадратичное значение (амплитуду) шума
+    noise_rms = np.sqrt(noise_power)
+    
+    # Переводим в дБ и добавляем X дБ
+    noise_rms_db = 20 * np.log10(noise_rms + 1e-12)
+    threshold_db = noise_rms_db + x_db
+    threshold_linear = 10**(threshold_db/20)
+    
+    print(f"Среднеквадратичное значение шума: {noise_rms:.6f} ({noise_rms_db:.2f} дБ)")
+    print(f"Порог обнаружения: {threshold_linear:.6f} ({threshold_db:.2f} дБ)")
+    
+    return threshold_linear
+
+def find_targets(radar_image, min_distance, lobe_width_X, lobe_width_Y, discr_param, threshold_offset_db=10):
+    """
+    Обнаружение целей с правильным расчетом порога.
+    """
+    # Расчет порога
+    threshold = calculate_noise_threshold(radar_image, threshold_offset_db)
+    
+    print(f"Максимум изображения: {np.max(radar_image):.6f}")
+    print(f"Отношение максимум/порог: {np.max(radar_image)/threshold:.2f}")
+    
+    # Находим локальные максимумы
+    local_max = ndimage.maximum_filter(radar_image, size=min_distance) == radar_image
+    
+    # Применяем порог
+    above_threshold = radar_image > threshold
+    
+    # Объединяем условия
+    detected = local_max & above_threshold
+    
+    # Получаем координаты
+    peaks = np.where(detected)
+    peaks_coords = list(zip(peaks[0], peaks[1]))
+    
+    # Дополнительная фильтрация по интенсивности
+    filtered_peaks = []
+    for y, x in peaks_coords:
+        if radar_image[y, x] > threshold * 2.0:  # как минимум в 2 раза выше порога
+            filtered_peaks.append((y, x))
+    
+    print(f"Найдено кандидатов: {len(peaks_coords)}, после фильтрации: {len(filtered_peaks)}")
+    
+    return filtered_peaksimport numpy as np
 import matplotlib.pyplot as plt
 from scipy import ndimage
 import matplotlib
