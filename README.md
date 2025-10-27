@@ -1,69 +1,255 @@
-import numpy as np
-from scipy import ndimage
+def generate_typst_report(radar_image, detected_peaks, targets_data, output_folder):
+    """
+    Генерирует typst-код для отчета с правильным синтаксисом.
+    """
+    current_time = datetime.datetime.now().strftime("%d.%m.%Y %H:%M")
+    
+    typ_content = f'''#set page(width: auto, height: auto, margin: 1.5cm)
+#set text(font: "New Computer Modern", size: 12pt)
+#show heading: set text(weight: "bold")
 
-def generate_radar_image(targets, image_size, lobe_width_X, lobe_width_Y, discr_param, snr_db=20):
-    """Генерирует РЛИ с комплексным гауссовским шумом."""
-    radar_image = np.zeros(image_size, dtype=complex)
-    
-    for target in targets:
-        x, y = target
-        sinc_target = generate_2d_sinc(x, y, image_size, lobe_width_X, lobe_width_Y, discr_param)
-        radar_image += sinc_target
-    
-    peak_signal_power = np.max(np.abs(radar_image))**2
-    noise_power = peak_sower / (10**(snr_db/10))
-    noise_std = np.sqrt(noise_power / 2)
-    noise_real = np.random.normal(0, noise_std, image_size)
-    noise_imag = np.random.normal(0, noise_std, image_size)
-    complex_noise = noise_real + 1j * noise_imag
-    
-    radar_image_with_noise = radar_image + complex_noise
-    return radar_image_with_noise  # Возвращаем комплексное изображение
+#align(center)[
+  #text(size: 24pt, weight: "bold")[Анализ радиолокационного изображения]
+  #text(size: 10pt)[  
+  Отчет сгенерирован {current_time}
+  ]
+]
 
-def check_rayleigh_amplitude(amplitudes):
-    """Проверяет, соответствуют ли амплитуды распределению Релея."""
-    if len(amplitudes) < 50:
-        return False, float('inf')
-    
-    mean_val = np.mean(amplitudes)
-    std_val = np.std(amplitudes)
-    
-    if mean_val < 1e-12:
-        return False, float('inf')
-    
-    # Для распределения Релея: mean = σ * sqrt(π/2), std = σ * sqrt(2 - π/2)
-    # Отношение std/mean должно быть постоянным: sqrt((2 - π/2)/(π/2)) ≈ 0.5227
-    expected_ratio = np.sqrt((2 - np.pi/2) / (np.pi/2))
-    current_ratio = std_val / mean_val
-    
-    ratio_diff = abs(current_ratio - expected_ratio)
-    
-    # Вычисляем параметр σ двумя способами
-    sigma_from_mean = mean_val / np.sqrt(np.pi/2)
-    sigma_from_std = std_val / np.sqrt(2 - np.pi/2)
-    sigma_diff = abs(sigma_from_mean - sigma_from_std) / ((sigma_from_mean + sigma_from_std)/2)
-    
-    # Комбинированная мера соответствия
-    match_quality = ratio_diff + sigma_diff
-    
-    # Считаем, что распределение соответствует Релею, если match_quality < 0.3
-    return match_quality < 0.3, match_quality
+#block[
+  **Размер голограммы:** {radar_image.shape[1]} × {radar_image.shape[0]} пикселей \
+  **Количество целей:** {len(detected_peaks)}
+]
 
-def check_uniform_phase(phases):
-    """Проверяет, равномерно ли распределены фазы."""
-    if len(phases) < 50:
-        return False, float('inf')
+// Визуализация РЛИ
+#figure(
+  image("radar_image.png", width: 100%),
+  caption: [Радиолокационное изображение с обнаруженными целями]
+)
+
+#pagebreak()
+'''
+
+    # Добавляем данные по каждой цели с правильным синтаксисом
+    for i, target_data in enumerate(targets_data):
+        target_id = i + 1
+        target_coords = detected_peaks[i]
+        
+        typ_content += f'''
+#align(center)[
+  #text(size: 18pt, weight: "bold")[Цель №{target_id}]
+]
+
+**Координаты:** азимут {target_coords[0]}, дальность {target_coords[1]}
+
+// Визуализация окна цели
+#figure(
+  grid(
+    columns: 2,
+    gutter: 2cm,
+    [
+      #figure(
+        image("target_{target_id}/target_{target_id}_linear.png", width: 100%),
+        caption: [Окно цели - линейный масштаб]
+      )
+    ],
+    [
+      #figure(
+        image("target_{target_id}/target_{target_id}_db.png", width: 100%),
+        caption: [Окно цели - def generate_typst_report(radar_image, detected_peaks, targets_data, output_folder):
+    """
+    Генерирует typst-код для отчета с правильным синтаксисом.
+    """
+    current_time = datetime.datetime.now().strftime("%d.%m.%Y %H:%M")
     
-    # Нормализуем фазы к диапазону [0, 2π]
-    phases_normalized = phases % (2 * np.pi)
+    typ_content = f'''#set page(width: auto, height: auto, margin: 1.5cm)
+#set text(font: "New Computer Modern", size: 12pt)
+#show heading: set text(weight: "bold")
+
+#align(center)[
+  #text(size: 24pt, weight: "bold")[Анализ радиолокационного изображения]
+  #text(size: 10pt)[  
+  Отчет сгенерирован {current_time}
+  ]
+]
+
+#block[
+  **Размер голограммы:** {radar_image.shape[1]} × {radar_image.shape[0]} пикселей \
+  **Количество целей:** {len(detected_peaks)}
+]
+
+// Визуализация РЛИ
+#figure(
+  image("radar_image.png", width: 100%),
+  caption: [Радиолокационное изображение с обнаруженными целями]
+)
+
+#pagebreak()
+'''
+
+def generate_typst_report(radar_image, detected_peaks, targets_data, output_folder):
+    """
+    Генерирует аккуратный typst-код для отчета с одинаковыми размерами изображений.
+    """
+    current_time = datetime.datetime.now().strftime("%d.%m.%Y %H:%M")
     
-    # Разбиваем на бины и проверяем равномерность
-    n_bins = 12
-    hist, bin_edges = np.histogram(phases_normalized, bins=n_bins, range=(0, 2*np.pi))
+    typ_content = f'''#set page(width: auto, height: auto, margin: 2cm)
+#set text(font: "New Computer Modern", size: 11pt)
+#show heading: set text(weight: "bold")
+
+#align(center)[
+  #text(size: 28pt, weight: "bold")[Анализ радиолокационного изображения]
+  
+  #text(size: 12pt, weight: "medium")[  
+  Отчет сгенерирован {current_time}
+  ]
+]
+
+#set par(justify: true)
+#block(
+  indent: 0pt,
+  spacing: 1.2em,
+)[
+  **Размер голограммы:** {radar_image.shape[1]} × {radar_image.shape[0]} пикселей \
+  **Количество целей:** {len(detected_peaks)}
+]
+
+// Визуализация РЛИ
+#align(center)[
+  #figure(
+    image("radar_image.png", width: 80%),
+    caption: [Радиолокационное изображение с обнаруженными целями]
+  )
+]
+
+#pagebreak()
+'''
+
+    # Добавляем данные по каждой цели
+    for i, target_data in enumerate(targets_data):
+        target_id = i + 1
+        target_coords = detected_peaks[i]
+        
+        typ_content += f'''
+#pagebreak()
+#align(center)[
+  #text(size: 22pt, weight: "bold")[Цель №{target_id}]
+]
+
+#align(center)[
+  #text(size: 14pt, weight: "medium")[Координаты: азимут {target_coords[0]}, дальность {target_coords[1]}]
+]
+
+// Визуализация окна цели
+#align(center)[
+  #text(size: 16pt, weight: "bold")[Визуализация окна цели]
+]
+
+#align(center)[
+  #figure(
+    grid(
+      columns: 2,
+      gutter: 2cm,
+      [
+        #figure(
+          image("target_{target_id}/target_{target_id}_linear.png", width: 100%),
+          caption: [Линейный масштаб]
+        )
+      ],
+      [
+        #figure(
+          image("target_{target_id}/target_{target_id}_db.png", width: 100%),
+          caption: [Логарифмический масштаб]
+        )
+      ]
+    )
+  )
+]
+
+// Параметры цели
+#align(center)[
+  #text(size: 16pt, weight: "bold")[Параметры отклика от цели №{target_id}]
+]
+
+#align(center)[
+  #grid(
+    columns: 2,
+    gutter: 2cm,
+    [
+      #table(
+        columns: 2,
+        align: center,
+        stroke: (x: 0.5pt, y: 0.5pt),
+        inset: 8pt,
+        caption: [Горизонтальное сечение],
+        [
+          [*Параметр*], [*Значение*],
+          [Ширина главного лепестка], ["{target_data['h_width']:.4f}"],
+          [Максимальный УБЛ], ["{target_data['h_pslr']:.2f} дБ"],
+          [Интегральный УБЛ], ["{target_data['h_i_pslr']:.2f} дБ"]
+        ]
+      )
+    ],
+    [
+      #table(
+        columns: 2,
+        align: center,
+        stroke: (x: 0.5pt, y: 0.5pt),
+        inset: 8pt,
+        caption: [Вертикальное сечение],
+        [
+          [*Параметр*], [*Значение*],
+          [Ширина главного лепестка], ["{target_data['v_width']:.4f}"],
+          [Максимальный УБЛ], ["{target_data['v_pslr']:.2f} дБ"],
+          [Интегральный УБЛ], ["{target_data['v_i_pslr']:.2f} дБ"]
+        ]
+      )
+    ]
+  )
+]
+
+// Сечения цели
+#align(center)[
+  #text(size: 16pt, weight: "bold")[Анализ сечений цели]
+]
+
+#align(center)[
+  #figure(
+    grid(
+      columns: 2,
+      gutter: 2cm,
+      [
+        #figure(
+          image("target_{target_id}/target_{target_id}_horizontal.png", width: 100%),
+          caption: [Горизонтальное сечение]
+        )
+      ],
+      [
+        #figure(
+          image("target_{target_id}/target_{target_id}_vertical.png", width: 100%),
+          caption: [Вертикальное сечение]
+        )
+      ]
+    )
+  )
+]
+'''
     
-    # Для равномерного распределения все бины должны иметь примерно одинаковое количество элементов
-    expected_count = len(phases) / n_bins
-    chi_squared = np.sum((hist - expected_count)**2 / expected_count)
+    # Сохраняем typst-файл
+    typ_filename = os.path.join(output_folder, "report.typ")
+    with open(typ_filename, 'w', encoding='utf-8') as f:
+        f.write(typ_content)
+    
+    return typ_filename)
+
+#pagebreak()
+'''
+    
+    # Сохраняем typst-файл
+    typ_filename = os.path.join(output_folder, "report.typ")
+    with open(typ_filename, 'w', encoding='utf-8') as f:
+        f.write(typ_content)
+    
+    return typ_filename**2 / expected_count)
     
     # Нормализуем хи-квадрат
     normalized_chi = chi_squared / n_bins
