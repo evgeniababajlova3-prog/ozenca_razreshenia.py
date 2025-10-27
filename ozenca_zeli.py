@@ -21,7 +21,6 @@ SINC_WIDTH_Y = 3.0 # Ширина sinc-функции в вертикально�
 # Параметры обнаружения
 MIN_DISTANCE = 50
 
-
 # Параметры окон
 WINDOW_SIZE = (128, 128)  # Размер окна анализа вокруг цели
 SINC_WIDTH = 1.0
@@ -30,6 +29,9 @@ TIME_RANGE = 10.0
 
 RANGE_RESOLUTION = 1.0  # метров на отсчет по дальности
 AZIMUTH_RESOLUTION = 1.0  # метров на отсчет по азимуту
+
+SNR_DB = 30  # Отношение сигнал/шум в дБ
+THRESHOLD_OFFSET_DB = 3  # Надбавка к шуму для порога в дБ
 
 ###############################################################################
 # МОДУЛЬ 1: ГЕНЕРАЦИЯ РАДИОЛОКАЦИОННОГО ИЗОБРАЖЕНИЯ
@@ -54,106 +56,85 @@ def generate_2d_sinc(x0, y0, size, lobe_width_X, lobe_width_Y, discr_param):
     return sinc_2d
 
 
-def generate_radar_image(targets, image_size, lobe_width_X, lobe_width_Y, discr_param, noise_level_db):
-    """Генерирует радиолокационное изображение с реалистичным шумом."""
-    radar_image = np.zeros(image_size)
+def generate_radar_image(targets, image_size, lobe_width_X, lobe_width_Y, discr_param, snr_db=20):
+    """Генерирует РЛИ с комплексным гауссовским шумом."""
+    radar_image = np.zeros(image_size, dtype=complex)
 
     for target in targets:
         x, y = target
         sinc_target = generate_2d_sinc(x, y, image_size, lobe_width_X, lobe_width_Y, discr_param)
         radar_image += sinc_target
 
-    # Добавляем реалистичный шум
-    peak_signal = np.max(radar_image)
-    noise_power = peak_signal * 10 ** (noise_level_db / 20)
-    noise_real = np.random.normal(0, noise_power, image_size)
-    noise_imag = np.random.normal(0, noise_power, image_size)
+    peak_signal_power = np.max(np.abs(radar_image)) ** 2
+    noise_power = peak_signal_power / (10 ** (snr_db / 10))
+    noise_std = np.sqrt(noise_power / 2)
+    noise_real = np.random.normal(0, noise_std, image_size)
+    noise_imag = np.random.normal(0, noise_std, image_size)
     complex_noise = noise_real + 1j * noise_imag
 
-    # Преобразуем в комплексный сигнал с шумом
-    radar_image_complex = radar_image + complex_noise
-    radar_image = np.abs(radar_image_complex)
-
-    return radar_image
+    radar_image_with_noise = radar_image + complex_noise
+    return np.abs(radar_image_with_noise)
 
 
-###############################################################################
-# МОДУЛЬ 2: ОБНАРУЖЕНИЕ ЦЕЛЕЙ
-###############################################################################
-
-def calculate_noise_threshold(radar_image, window_size=(32, 32), x_db=10):
+def find_noise_region(radar_image, window_size=(100, 100), num_samples=100):
     """
-    расчет порога по шумовой области.
-
-    Args:
-        radar_image: радиолокационное изображение
-        window_size: размер окна для анализа шума
-        x_db: добавка в дБ к медианному уровню шума
+    Находит область с наиболее равномерным распределением (по гистограмме).
+    Критерий: минимальное стандартное отклонение гистограммы.
     """
     h, w = radar_image.shape
     window_h, window_w = window_size
 
-    # 1. Ищем углы изображения как заведомо шумовые области
-    corners = [
-        radar_image[0:window_h, 0:window_w],  # левый верхний
-        radar_image[0:window_h, w - window_w:w],  # правый верхний
-        radar_image[h - window_h:h, 0:window_w],  # левый нижний
-        radar_image[h - window_h:h, w - window_w:w]  # правый нижний
-    ]
+    best_uniformity = float('inf')
+    best_window = None
 
-    # 2. Добавляем несколько случайных окон, но с проверкой на "нецелевые" характеристики
-    additional_windows = []
-    for _ in range(20):
+    for i in range(num_samples):
         y_start = np.random.randint(0, h - window_h)
         x_start = np.random.randint(0, w - window_w)
 
-        window = radar_image[y_start:y_start + window_h, x_start:x_start + window_w]
+        window = radar_image[y_start:y_start + window_h, x_start:x_start + window_w].flatten()
 
-        # Критерии для шумового окна:
-        # - низкая максимальная амплитуда (меньше 10% от максимума изображения)
-        # - низкое отношение максимума к среднему
-        max_val = np.max(window)
-        mean_val = np.mean(window)
+        # Строим гистограмму и оцениваем равномерность распределения
+        hist, bin_edges = np.histogram(window, bins=20, density=True)
 
-        if (max_val < 0.1 * np.max(radar_image) and
-                max_val / mean_val < 3.0):  # в равномерном шуме это отношение небольшое
-            additional_windows.append(window)
+        # Мера равномерности: стандартное отклонение гистограммы
+        # Чем более равномерное распределение, тем меньше std гистограммы
+        hist_std = np.std(hist)
 
-    # 3. Собираем все кандидаты в шумовые области
-    all_noise_windows = corners + additional_windows
+        if hist_std < best_uniformity:
+            best_window = window
 
-
-        # Вычисляем медиану средних значений по окнам (медиана устойчива к выбросам)
-    window_means = [np.mean(window) for window in all_noise_windows]
-    noise_estimate = np.median(window_means)
-
-    # 4. Переводим в дБ и добавляем X дБ
-    noise_estimate_db = 20 * np.log10(noise_estimate)
-    threshold_db = noise_estimate_db + x_db
-
-    return 10 ** (threshold_db / 20)
+    return best_window
 
 
-def find_targets(radar_image, min_distance, lobe_width_X, lobe_width_Y, discr_param, noise_threshold=None):
-    """Обнаружение целей с улучшенным порогом."""
-    if noise_threshold is None:
-        noise_threshold = calculate_noise_threshold(radar_image)
+def calculate_noise_threshold(radar_image, x_db):
+    """Расчет порога на основе мощности шума."""
+    # Находим шумовую область
+    noise_window = find_noise_region(radar_image)
 
-    # Создаем маску локальных максимумов
+    # Вычисляем мощность шума
+    noise_power = 1*np.max(noise_window ** 2)
+
+    # Вычисляем среднеквадратичное значение шума
+    noise_rms = np.sqrt(noise_power)
+
+    # Устанавливаем порог
+    threshold_db = 20 * np.log10(noise_rms) + x_db
+    threshold_linear = 10 ** (threshold_db / 20)
+
+    return threshold_linear
+
+
+def find_targets(radar_image, min_distance, threshold_offset_db=10):
+    """Обнаружение целей."""
+    threshold = calculate_noise_threshold(radar_image, threshold_offset_db)
+
+    # Находим локальные максимумы
     local_max = ndimage.maximum_filter(radar_image, size=min_distance) == radar_image
-
-    # Применяем порог
-    above_threshold = radar_image > noise_threshold
-
-    # Дополнительный фильтр: отбрасываем слишком слабые цели
-    strong_targets = radar_image > (noise_threshold*2)
-
-    detected = local_max & above_threshold & strong_targets
+    above_threshold = radar_image > threshold
+    detected = local_max & above_threshold
 
     peaks = np.where(detected)
     peaks_coords = list(zip(peaks[0], peaks[1]))
-
-    print(f"Найдено кандидатов: {len(peaks_coords)}")
 
     return peaks_coords
 
@@ -429,8 +410,8 @@ def generate_analysis_report(radar_image, detected_peaks, all_targets_data, outp
 def compile_typst_to_pdf(typ_filename):
     """Компилирует typst-файл в PDF."""
 
-    # Путь к компилятору typst (настрой под себя)
-    typst_path = r'C:\Users\Gisich_AV\Desktop\typst\typst.exe'  # Измени на свой путь
+    # Путь к компилятору typst
+    typst_path = r'C:\Users\Gisich_AV\Desktop\typst\typst.exe'
 
     pdf_path = typ_filename.replace('.typ', '.pdf')
 
@@ -452,12 +433,12 @@ def compile_typst_to_pdf(typ_filename):
 ###############################################################################
 
 def main():
-    radar_image = generate_radar_image(TARGETS, IMAGE_SIZE, SINC_WIDTH_X, SINC_WIDTH_Y, DISCR_PARAM, noise_level_db=-25)
+    radar_image = generate_radar_image(TARGETS, IMAGE_SIZE, SINC_WIDTH_X, SINC_WIDTH_Y, DISCR_PARAM, SNR_DB)
     print(f"   Количество исходных целей: {len(TARGETS)}")
 
-    threshold= calculate_noise_threshold(radar_image, window_size=(50, 50), x_db=10)
+    threshold= calculate_noise_threshold(radar_image, x_db=10)
 
-    detected_peaks = find_targets(radar_image,MIN_DISTANCE, SINC_WIDTH_X, SINC_WIDTH_Y, DISCR_PARAM, threshold)
+    detected_peaks = find_targets(radar_image, MIN_DISTANCE, THRESHOLD_OFFSET_DB)
     print(f"   Обнаружено целей: {len(detected_peaks)}")
 
     # Визуализация РЛИ
