@@ -1,85 +1,159 @@
-def main():
-    # Параметры
-    SNR_DB = 15  # Отношение сигнал/шум в дБ
-    THRESHOLD_OFFSET_DB = 15  # Надбавка к шуму для порога в дБ
-    
-    # Генерация РЛИ с шумом
-    radar_image_amplitude, radar_image_complex = generate_radar_image(
-        TARGETS, IMAGE_SIZE, SINC_WIDTH_X, SINC_WIDTH_Y, DISCR_PARAM, snr_db=SNR_DB)
-    
-    print(f"Размер РЛИ: {radar_image_amplitude.shape}")
-    print(f"Диапазон амплитуд: {np.min(radar_image_amplitude):.6f} - {np.max(radar_image_amplitude):.6f}")
-    
-    # Обнаружение целей
-    detected_peaks = find_targets(
-        radar_image_amplitude, radar_image_complex, MIN_DISTANCE, 
-        SINC_WIDTH_X, SINC_WIDTH_Y, DISCR_PARAM, THRESHOLD_OFFSET_DB)
-    
-    # Визуализация РЛИ
-    plot_radar_image(radar_image_amplitude, detected_peaks, TARGETS)
-    
-    print("\nИТОГОВЫЙ ОТЧЕТ")
-    print(f"Количество исходных целей: {len(TARGETS)}")
-    print(f"Обнаружено целей: {len(detected_peaks)}")
-    
-    # Список для хранения данных по целям для отчета
-    targets_data = []
-    
-    for i, target_yx in enumerate(detected_peaks):
-        print(f"\nЦель {i+1} (координаты: {target_yx}):")
-        
-        # Выделение окна
-        window = extract_target_window(radar_image_amplitude, target_yx, WINDOW_SIZE)
-        
-        # Извлечение сечений
-        horizontal_section, vertical_section = extract_sections(window)
-        
-        # Анализ горизонтального сечения
-        print(f"Горизонтальное сечение цели {i + 1}")
-        t_h, h_signal_db, h_signal_linear = generate_sinc_signal_from_section(
-            horizontal_section, WINDOW_SIZE[0], DISCR_PARAM)
-        h_results = analiz_sechenia(t_h, h_signal_db)
-        
-        # Анализ вертикального сечения  
-        print(f"Вертикальное сечение цели {i + 1}")
-        t_v, v_signal_db, v_signal_linear = generate_sinc_signal_from_section(
-            vertical_section, WINDOW_SIZE[1], DISCR_PARAM)
-        v_results = analiz_sechenia(t_v, v_signal_db)
-        
-        # Формируем данные для отчета
-        target_data = {
-            'window_linear': window,
-            'h_t': t_h,
-            'h_signal_db': h_signal_db,
-            'h_wl': h_results.get('wl'),
-            'h_wr': h_results.get('wr'), 
-            'h_width': h_results.get('measured_width', 0),
-            'h_pslr': h_results.get('classical_pslr', -80),
-            'h_i_pslr': h_results.get('integral_pslr', -80),
-            'v_t': t_v,
-            'v_signal_db': v_signal_db,
-            'v_wl': v_results.get('wl'),
-            'v_wr': v_results.get('wr'),
-            'v_width': v_results.get('measured_width', 0),
-            'v_pslr': v_results.get('classical_pslr', -80),
-            'v_i_pslr': v_results.get('integral_pslr', -80)
-        }
-        targets_data.append(target_data)
-        
-        # Визуализация окна цели (опционально, для отладки)
-        plot_target_window(window, i+1)
-    
-    # Генерируем PDF отчет
-    generate_analysis_report(radar_image_amplitude, detected_peaks, targets_data)
-    
-    print("\n✅ Анализ завершен! Проверь папку 'analysis_report'")def analiz_sechenia(t_original, sinc_db):
+def generate_typst_report(radar_image, detected_peaks, targets_data, output_folder):
     """
-    Анализ сечения и возврат результатов в виде словаря.
+    Генерирует аккуратный typst-код для отчета с одинаковыми размерами изображений.
     """
-    # Sinc-интерполяция
-    t_interp, sinc_interp = sinc_interpolation(t_original, sinc_db, KERNEL_SIZE, SUBSAMPLES, TIME_RANGE, F_DISCR, INTERP_FACTOR)
+    current_time = datetime.datetime.now().strftime("%d.%m.%Y %H:%M")
+    
+    typ_content = f'''#set page(width: auto, height: auto, margin: 2cm)
+#set text(font: "New Computer Modern", size: 11pt)
+#show heading: set text(weight: "bold")
 
-    # Нахождение ширины главного лепестка
+#align(center)[
+  #text(size: 28pt, weight: "bold")[Анализ радиолокационного изображения]
+  
+  #text(size: 12pt, weight: "medium")[  
+  Отчет сгенерирован {current_time}
+  ]
+]
+
+#set par(justify: true)
+#block(
+  indent: 0pt,
+  spacing: 1.2em,
+)[
+  **Размер голограммы:** {radar_image.shape[1]} × {radar_image.shape[0]} пикселей \
+  **Количество целей:** {len(detected_peaks)}
+]
+
+// Визуализация РЛИ
+#align(center)[
+  #figure(
+    image("radar_image.png", width: 80%),
+    caption: [Радиолокационное изображение с обнаруженными целями]
+  )
+]
+
+#pagebreak()
+'''
+
+    # Добавляем данные по каждой цели
+    for i, target_data in enumerate(targets_data):
+        target_id = i + 1
+        target_coords = detected_peaks[i]
+        
+        typ_content += f'''
+#pagebreak()
+#align(center)[
+  #text(size: 22pt, weight: "bold")[Цель №{target_id}]
+]
+
+#align(center)[
+  #text(size: 14pt, weight: "medium")[Координаты: азимут {target_coords[0]}, дальность {target_coords[1]}]
+]
+
+// Визуализация окна цели
+#align(center)[
+  #text(size: 16pt, weight: "bold")[Визуализация окна цели]
+]
+
+#align(center)[
+  #figure(
+    grid(
+      columns: 2,
+      gutter: 2cm,
+      [
+        #figure(
+          image("target_{target_id}/target_{target_id}_linear.png", width: 100%),
+          caption: [Линейный масштаб]
+        )
+      ],
+      [
+        #figure(
+          image("target_{target_id}/target_{target_id}_db.png", width: 100%),
+          caption: [Логарифмический масштаб]
+        )
+      ]
+    )
+  )
+]
+
+// Параметры цели
+#align(center)[
+  #text(size: 16pt, weight: "bold")[Параметры отклика от цели №{target_id}]
+]
+
+#align(center)[
+  #grid(
+    columns: 2,
+    gutter: 2cm,
+    [
+      #table(
+        columns: 2,
+        align: center,
+        stroke: (x: 0.5pt, y: 0.5pt),
+        inset: 8pt,
+        caption: [Горизонтальное сечение],
+        [
+          [*Параметр*], [*Значение*],
+          [Ширина главного лепестка], ["{target_data['h_width']:.4f}"],
+          [Максимальный УБЛ], ["{target_data['h_pslr']:.2f} дБ"],
+          [Интегральный УБЛ], ["{target_data['h_i_pslr']:.2f} дБ"]
+        ]
+      )
+    ],
+    [
+      #table(
+        columns: 2,
+        align: center,
+        stroke: (x: 0.5pt, y: 0.5pt),
+        inset: 8pt,
+        caption: [Вертикальное сечение],
+        [
+          [*Параметр*], [*Значение*],
+          [Ширина главного лепестка], ["{target_data['v_width']:.4f}"],
+          [Максимальный УБЛ], ["{target_data['v_pslr']:.2f} дБ"],
+          [Интегральный УБЛ], ["{target_data['v_i_pslr']:.2f} дБ"]
+        ]
+      )
+    ]
+  )
+]
+
+// Сечения цели
+#align(center)[
+  #text(size: 16pt, weight: "bold")[Анализ сечений цели]
+]
+
+#align(center)[
+  #figure(
+    grid(
+      columns: 2,
+      gutter: 2cm,
+      [
+        #figure(
+          image("target_{target_id}/target_{target_id}_horizontal.png", width: 100%),
+          caption: [Горизонтальное сечение]
+        )
+      ],
+      [
+        #figure(
+          image("target_{target_id}/target_{target_id}_vertical.png", width: 100%),
+          caption: [Вертикальное сечение]
+        )
+      ]
+    )
+  )
+]
+'''
+    
+    # Сохраняем typst-файл
+    typ_filename = os.path.join(output_folder, "report.typ")
+    with open(typ_filename, 'w', encoding='utf-8') as f:
+        f.write(typ_content)
+    
+    return typ_filename main():
+    # Параметры
+    SNR_DB = 15  # Отношение     # Нахождение ширины главного лепестка
     wl, wr, width, left_points, right_points = find_main_lobe_width(t_interp, sinc_interp)
 
     # Расчет УБЛ
@@ -120,229 +194,8 @@ def generate_radar_image(targets, image_size, lobe_width_X, lobe_width_Y, discr_
     radar_image_with_noise = radar_image + complex_noise
     return radar_image_with_noise  # Возвращаем комплексное изображение
 
-def check_rayleigh_amplitude(amplitudes):
-    """Проверяет, соответствуют ли амплитуды распределению Релея."""
-    if len(amplitudes) < 50:
-        return False, float('inf')
-    
-    mean_val = np.mean(amplitudes)
-    std_val = np.std(amplitudes)
-    
-    if mean_val < 1e-12:
-        return False, float('inf')
-    
-    # Для распределения Релея: mean = σ * sqrt(π/2), std = σ * sqrt(2 - π/2)
-    # Отношение std/mean должно быть постоянным: sqrt((2 - π/2)/(π/2)) ≈ 0.5227
-    expected_ratio = np.sqrt((2 - np.pi/2) / (np.pi/2))
-    current_ratio = std_val / mean_val
-    
-    ratio_diff = abs(current_ratio - expected_ratio)
-    
-    # Вычисляем параметр σ двумя способами
-    sigma_from_mean = mean_val / np.sqrt(np.pi/2)
-    sigma_from_std = std_val / np.sqrt(2 - np.pi/2)
-    sigma_diff = abs(sigma_from_mean - sigma_from_std) / ((sigma_from_mean + sigma_from_std)/2)
-    
-    # Комбинированная мера соответствия
-    match_quality = ratio_diff + sigma_diff
-    
-    # Считаем, что распределение соответствует Релею, если match_quality < 0.3
-    return match_quality < 0.3, match_quality
-
-def check_uniform_phase(phases):
-    """Проверяет, равномерно ли распределены фазы."""
-    if len(phases) < 50:
-        return False, float('inf')
-    
-    # Нормализуем фазы к диапазону [0, 2π]
-    phases_normalized = phases % (2 * np.pi)
-    
-    # Разбиваем на бины и проверяем равномерность
-    n_bins = 12
-    hist, bin_edges = np.histogram(phases_normalized, bins=n_bins, range=(0, 2*np.pi))
-    
-    # Для равномерного распределения все бины должны иметь примерно одинаковое количество элементов
-    expected_count = len(phases) / n_bins
-    chi_squared = np.sum((hist - expected_count)**2 / expected_count)
-    
-    # Нормализуем хи-квадрат
-    normalized_chi = chi_squared / n_bins
-    
-    # Считаем, что распределение равномерное, если normalized_chi < 0.5
-    return normalized_chi < 0.5, normalized_chi
-
-def find_rayleigh_uniform_region(radar_image_complex, window_size=(50, 50), num_samples=100):
-    """Находит область, где амплитуды распределены по Релею, а фазы равномерно."""
-    h, w = radar_image_complex.shape
-    window_h, window_w = window_size
-    
-    best_match = float('inf')
-    best_window_complex = None
-    best_amplitudes = None
-    best_phases = None
-    
-    for _ in range(num_samples):
-        y_start = np.random.randint(0, h - window_h)
-        x_start = np.random.randint(0, w - window_w)
-        
-        window_complex = radar_image_complex[y_start:y_start+window_h, x_start:x_start+window_w]
-        
-        # Извлекаем амплитуды и фазы
-        amplitudes = np.abs(window_complex).flatten()
-        phases = np.angle(window_complex).flatten()
-        
-        # Пропускаем окна с явными целями (слишком высокие амплитуды)
-        if np.max(amplitudes) > np.percentile(np.abs(radar_image_complex), 70):
-            continue
-            
-        # Проверяем распределение амплитуд
-        is_rayleigh, ray_match_quality = check_rayleigh_amplitude(amplitudes)
-        
-        # Проверяем распределение фаз
-        is_uniform, uniform_match_quality = check_uniform_phase(phases)
-        
-        # Комбинированная мера соответствия
-        if is_rayleigh and is_uniform:
-            match_quality = ray_match_quality + uniform_match_quality
-            
-            if match_quality < best_match:
-                best_match = match_quality
-                best_window_complex = window_complex
-                best_amplitudes = amplitudes
-                best_phases = phases
-    
-    return best_window_complex, best_amplitudes, best_phases, best_match
-
-def calculate_noise_threshold(radar_image_complex, x_db=10):
-    """Расчет порога на основе мощности шума в области с распределением Релея и равномерными фазами."""
-    # Находим шумовую область
-    noise_window, amplitudes, phases, match_quality = find_rayleigh_uniform_region(radar_image_complex)
-    
-    if noise_window is None:
-        # Если не нашли область с нужными распределениями, используем более простой метод
-        amplitudes_full = np.abs(radar_image_complex).flatten()
-        # Исключаем самые яркие пиксели (возможные цели)
-        noise_power = np.percentile(amplitudes_full**2, 15)
-    else:
-        # Вычисляем мощность шума
-        noise_power = np.mean(amplitudes**2)
-    
-    # Вычисляем среднеквадратичное значение шума
-    noise_rms = np.sqrt(noise_power)
-    
-    # Устанавливаем порог
-    threshold_db = 20 * np.log10(noise_rms + 1e-12) + x_db
-    threshold_linear = 10**(threshold_db/20)
-    
-    return threshold_linear
-
-def find_targets(radar_image_complex, min_distance, lobe_width_X, lobe_width_Y, discr_param, threshold_offset_db=10):
-    """Обнаружение целей."""
-    # Получаем амплитудное изображение
-    radar_image_amplitude = np.abs(radar_image_complex)
-    
-    # Вычисляем порог
-    threshold = calculate_noise_threshold(radar_image_complex, threshold_offset_db)
-    
-    # Находим локальные максимумы
-    local_max = ndimage.maximum_filter(radar_image_amplitude, size=min_distance) == radar_image_amplitude
-    above_threshold = radar_image_amplitude > threshold
-    detected = local_max & above_threshold
-    
-    peaks = np.where(detected)
-    peaks_coords = list(zip(peaks[0], peaks[1]))
-    
-    return peaks_coordsimport numpy as np
-from scipy import ndimage
-from scipy.stats import rayleigh
-import matplotlib.pyplot as plt
-
-def generate_radar_image(targets, image_size, lobe_width_X, lobe_width_Y, discr_param, snr_db=20):
-    """
-    Генерирует РЛИ с комплексным гауссовским шумом заданного SNR.
-    """
-    radar_image = np.zeros(image_size, dtype=complex)
-    
-    # Генерируем чистый сигнал (цели)
-    for target in targets:
-        x, y = target
-        sinc_target = generate_2d_sinc(x, y, image_size, lobe_width_X, lobe_width_Y, discr_param)
-        radar_image += sinc_target
-    
-    # Вычисляем мощность пикового сигнала
-    peak_signal_power = np.max(np.abs(radar_image))**2
-    
-    # Вычисляем мощность шума на основе SNR
-    noise_power = peak_signal_power / (10**(snr_db/10))
-    
-    # Генерируем комплексный гауссовский шум
-    noise_std = np.sqrt(noise_power / 2)  # делим на 2 для комплексного шума
-    noise_real = np.random.normal(0, noise_std, image_size)
-    noise_imag = np.random.normal(0, noise_std, image_size)
-    complex_noise = noise_real + 1j * noise_imag
-    
-    # Добавляем шум к сигналу
-    radar_image_with_noise = radar_image + complex_noise
-    
-    return np.abs(radar_image_with_noise)
-
-def find_rayleigh_noise_region(radar_image, window_size=(50, 50), num_samples=100):
-    """
-    Находит область с распределением, наиболее близким к распределению Релея.
-    Критерий: минимальное расстояние Колмогорова-Смирнова до распределения Релея.
-    """
-    h, w = radar_image.shape
-    window_h, window_w = window_size
-    
-    best_ks_stat = float('inf')
-    best_window = None
-    best_coords = (0, 0)
-    best_scale = 0
-    
-    for _ in range(num_samples):
-        y_start = np.random.randint(0, h - window_h)
-        x_start = np.random.randint(0, w - window_w)
-        
-        window = radar_image[y_start:y_start+window_h, x_start:x_start+window_w].flatten()
-        
-        # Исключаем окна с явными целями (слишком высокие значения)
-        if np.max(window) > np.percentile(radar_image, 90):
-            continue
-            
-        # Оцениваем параметр масштаба для распределения Релея
-        # Для распределения Релея: scale = sqrt(mean(window**2) / 2)
-        scale_estimate = np.sqrt(np.mean(window**2) / 2)
-        
-        # Проверяем гипотезу о распределении Релея с помощью KS-теста
-        from scipy.stats import kstest
-        ks_stat, p_value = kstest(window, 'rayleigh', args=(scale_estimate,))
-        
-        # Ищем окно с наименьшей KS-статистикой (наиболее близкое к распределению Релея)
-        if ks_stat < best_ks_stat and p_value > 0.05:  # p-value > 0.05 означает, что распределение похоже на Релея
-            best_ks_stat = ks_stat
-            best_window = window
-            best_coords = (y_start, x_start)
-            best_scale = scale_estimate
-    
-    return best_window, best_coords, best_ks_stat, best_scale
-
-def plot_rayleigh_comparison(noise_window, scale, coords):
-    """Визуализация сравнения распределения в окне с распределением Релея."""
-    plt.figure(figsize=(10, 6))
-    
-    # Гистограмма данных
-    plt.hist(noise_window, bins=30, density=True, alpha=0.7, label='Данные из окна')
-    
-    # Теоретическое распределение Релея
-    x = np.linspace(0, np.max(noise_window), 100)
-    rayleigh_pdf = rayleigh.pdf(x, scale=scale)
-    plt.plot(x, rayleigh_pdf, 'r-', linewidth=2, label=f'Распределение Релея (scale={scale:.4f})')
-    
-    plt.title(f'Сравнение с распределением Релея (координаты {coords})')
-    plt.xlabel('Амплитуда')
-    plt.ylabel('Плотность вероятности')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
+                    """
+        plt.grid(True, alpha=0.3)
     plt.show()
 
 def calculate_noise_threshold(radar_image, x_db=10):
