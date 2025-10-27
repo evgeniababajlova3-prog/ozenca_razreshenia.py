@@ -1,4 +1,104 @@
-import numpy as np
+def main():
+    # Параметры
+    SNR_DB = 15  # Отношение сигнал/шум в дБ
+    THRESHOLD_OFFSET_DB = 15  # Надбавка к шуму для порога в дБ
+    
+    # Генерация РЛИ с шумом
+    radar_image_amplitude, radar_image_complex = generate_radar_image(
+        TARGETS, IMAGE_SIZE, SINC_WIDTH_X, SINC_WIDTH_Y, DISCR_PARAM, snr_db=SNR_DB)
+    
+    print(f"Размер РЛИ: {radar_image_amplitude.shape}")
+    print(f"Диапазон амплитуд: {np.min(radar_image_amplitude):.6f} - {np.max(radar_image_amplitude):.6f}")
+    
+    # Обнаружение целей
+    detected_peaks = find_targets(
+        radar_image_amplitude, radar_image_complex, MIN_DISTANCE, 
+        SINC_WIDTH_X, SINC_WIDTH_Y, DISCR_PARAM, THRESHOLD_OFFSET_DB)
+    
+    # Визуализация РЛИ
+    plot_radar_image(radar_image_amplitude, detected_peaks, TARGETS)
+    
+    print("\nИТОГОВЫЙ ОТЧЕТ")
+    print(f"Количество исходных целей: {len(TARGETS)}")
+    print(f"Обнаружено целей: {len(detected_peaks)}")
+    
+    # Список для хранения данных по целям для отчета
+    targets_data = []
+    
+    for i, target_yx in enumerate(detected_peaks):
+        print(f"\nЦель {i+1} (координаты: {target_yx}):")
+        
+        # Выделение окна
+        window = extract_target_window(radar_image_amplitude, target_yx, WINDOW_SIZE)
+        
+        # Извлечение сечений
+        horizontal_section, vertical_section = extract_sections(window)
+        
+        # Анализ горизонтального сечения
+        print(f"Горизонтальное сечение цели {i + 1}")
+        t_h, h_signal_db, h_signal_linear = generate_sinc_signal_from_section(
+            horizontal_section, WINDOW_SIZE[0], DISCR_PARAM)
+        h_results = analiz_sechenia(t_h, h_signal_db)
+        
+        # Анализ вертикального сечения  
+        print(f"Вертикальное сечение цели {i + 1}")
+        t_v, v_signal_db, v_signal_linear = generate_sinc_signal_from_section(
+            vertical_section, WINDOW_SIZE[1], DISCR_PARAM)
+        v_results = analiz_sechenia(t_v, v_signal_db)
+        
+        # Формируем данные для отчета
+        target_data = {
+            'window_linear': window,
+            'h_t': t_h,
+            'h_signal_db': h_signal_db,
+            'h_wl': h_results.get('wl'),
+            'h_wr': h_results.get('wr'), 
+            'h_width': h_results.get('measured_width', 0),
+            'h_pslr': h_results.get('classical_pslr', -80),
+            'h_i_pslr': h_results.get('integral_pslr', -80),
+            'v_t': t_v,
+            'v_signal_db': v_signal_db,
+            'v_wl': v_results.get('wl'),
+            'v_wr': v_results.get('wr'),
+            'v_width': v_results.get('measured_width', 0),
+            'v_pslr': v_results.get('classical_pslr', -80),
+            'v_i_pslr': v_results.get('integral_pslr', -80)
+        }
+        targets_data.append(target_data)
+        
+        # Визуализация окна цели (опционально, для отладки)
+        plot_target_window(window, i+1)
+    
+    # Генерируем PDF отчет
+    generate_analysis_report(radar_image_amplitude, detected_peaks, targets_data)
+    
+    print("\n✅ Анализ завершен! Проверь папку 'analysis_report'")def analiz_sechenia(t_original, sinc_db):
+    """
+    Анализ сечения и возврат результатов в виде словаря.
+    """
+    # Sinc-интерполяция
+    t_interp, sinc_interp = sinc_interpolation(t_original, sinc_db, KERNEL_SIZE, SUBSAMPLES, TIME_RANGE, F_DISCR, INTERP_FACTOR)
+
+    # Нахождение ширины главного лепестка
+    wl, wr, width, left_points, right_points = find_main_lobe_width(t_interp, sinc_interp)
+
+    # Расчет УБЛ
+    if wl is not None and wr is not None:
+        classical_pslr, integral_pslr = calculate_sidelobe_levels(t_interp, sinc_interp)
+    else:
+        classical_pslr = integral_pslr = -80
+
+    # Визуализация (твоя существующая функция)
+    plot_results(t_original, sinc_db, t_interp, sinc_interp, wl, wr, width, left_points, right_points)
+
+    # Возвращаем результаты в виде словаря
+    return {
+        'measured_width': width,
+        'classical_pslr': classical_pslr,
+        'integral_pslr': integral_pslr,
+        'wl': wl,
+        'wr': wr
+    }import numpy as np
 from scipy import ndimage
 
 def generate_radar_image(targets, image_size, lobe_width_X, lobe_width_Y, discr_param, snr_db=20):
