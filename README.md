@@ -1,4 +1,269 @@
-import numpy as np
+def generate_typst_report(radar_image, detected_peaks, targets_data, output_folder):
+    """
+    Генерирует аккуратный typst-код для отчета с одинаковыми размерами изображений.
+    """
+    current_time = datetime.datetime.now().strftime("%d.%m.%Y %H:%M")
+    
+    typ_content = f'''#set page(width: auto, height: auto, margin: 2cm)
+#set text(font: "New Computer Modern", size: 11pt)
+#show heading: set text(weight: "bold")
+
+#align(center)[
+  #text(size: 28pt, weight: "bold")[Анализ радиолокационного изображения]
+  
+  #text(size: 12pt, weight: "medium")[  
+  Отчет сгенерирован {current_time}
+  ]
+]
+
+#set par(justify: true)
+#block(
+  indent: 0pt,
+  spacing: 1.2em,
+)[
+  **Размер голограммы:** {radar_image.shape[1]} × {radar_image.shape[0]} пикселей \
+  **Количество целей:** {len(detected_peaks)}
+]
+
+// Визуализация РЛИ
+#align(center)[
+  #figure(
+    image("radar_image.png", width: 80%),
+    caption: [Радиолокационное изображение с обнаруженными целями]
+  )
+]
+
+#pagebreak()
+'''
+
+    # Добавляем данные по каждой цели
+    for i, target_data in enumerate(targets_data):
+        target_id = i + 1
+        target_coords = detected_peaks[i]
+        
+        typ_content += f'''
+#pagebreak()
+#align(center)[
+  #text(size: 22pt, weight: "bold")[Цель №{target_id}]
+]
+
+#align(center)[
+  #text(size: 14pt, weight: "medium")[Координаты: азимут {target_coords[0]}, дальность {target_coords[1]}]
+]
+
+// Визуализация окна цели
+#align(center)[
+  #text(size: 16pt, weight: "bold")[Визуализация окна цели]
+]
+
+#align(center)[
+  #figure(
+    grid(
+      columns: 2,
+      gutter: 2cm,
+      [
+        #figure(
+          image("target_{target_id}/target_{target_id}_linear.png", width: 100%),
+          caption: [Линейный масштаб]
+        )
+      ],
+      [
+        #figure(
+          image("target_{target_id}/target_{target_id}_db.png", width: 100%),
+          caption: [Логарифмический масштаб]
+        )
+      ]
+    )
+  )
+]
+
+// Параметры цели
+#align(center)[
+  #text(size: 16pt, weight: "bold")[Параметры отклика от цели №{target_id}]
+]
+
+#align(center)[
+  #grid(
+    columns: 2,
+    gutter: 2cm,
+    [
+      #table(
+        columns: 2,
+        align: center,
+        stroke: (x: 0.5pt, y: 0.5pt),
+        inset: 8pt,
+        caption: [Горизонтальное сечение],
+        [
+          [*Параметр*], [*Значение*],
+          [Ширина главного лепестка], ["{target_data['h_width']:.4f}"],
+          [Максимальный УБЛ], ["{target_data['h_pslr']:.2f} дБ"],
+          [Интегральный УБЛ], ["{target_data['h_i_pslr']:.2f} дБ"]
+        ]
+      )
+    ],
+    [
+      #table(
+        columns: 2,
+        align: center,
+        stroke: (x: 0.5pt, y: 0.5pt),
+        inset: 8pt,
+        caption: [Вертикальное сечение],
+        [
+          [*Параметр*], [*Значение*],
+          [Ширина главного лепестка], ["{target_data['v_width']:.4f}"],
+          [Максимальный УБЛ], ["{target_data['v_pslr']:.2f} дБ"],
+          [Интегральный УБЛ], ["{target_data['v_i_pslr']:.2f} дБ"]
+        ]
+      )
+    ]
+  )
+]
+
+// Сечения цели
+#align(center)[
+  #text(size: 16pt, weight: "bold")[Анализ сечений цели]
+]
+
+#align(center)[
+  #figure(
+    grid(
+      columns: 2,
+      gutter: 2cm,
+      [
+        #figure(
+          image("target_{target_id}/target_{target_id}_horizontal.png", width: 100%),
+          caption: [Горизонтальное сечение]
+        )
+      ],
+      [
+        #figure(
+          image("target_{target_id}/target_{target_id}_vertical.png", width: 100%),
+          caption: [Вертикальное сечение]
+        )
+      ]
+    )
+  )
+]
+'''
+    
+    # Сохраняем typst-файл
+    typ_filename = os.path.join(output_folder, "report.typ")
+    with open(typ_filename, 'w', encoding='utf-8') as f:
+        f.write(typ_content)
+    
+    return typ_filename main():
+    # Параметры
+    SNR_DB = 15  # Отношение     # Нахождение ширины главного лепестка
+    wl, wr, width, left_points, right_points = find_main_lobe_width(t_interp, sinc_interp)
+
+    # Расчет УБЛ
+    if wl is not None and wr is not None:
+        classical_pslr, integral_pslr = calculate_sidelobe_levels(t_interp, sinc_interp)
+    else:
+        classical_pslr = integral_pslr = -80
+
+    # Визуализация (твоя существующая функция)
+    plot_results(t_original, sinc_db, t_interp, sinc_interp, wl, wr, width, left_points, right_points)
+
+    # Возвращаем результаты в виде словаря
+    return {
+        'measured_width': width,
+        'classical_pslr': classical_pslr,
+        'integral_pslr': integral_pslr,
+        'wl': wl,
+        'wr': wr
+    }import numpy as np
+from scipy import ndimage
+
+def generate_radar_image(targets, image_size, lobe_width_X, lobe_width_Y, discr_param, snr_db=20):
+    """Генерирует РЛИ с комплексным гауссовским шумом."""
+    radar_image = np.zeros(image_size, dtype=complex)
+    
+    for target in targets:
+        x, y = target
+        sinc_target = generate_2d_sinc(x, y, image_size, lobe_width_X, lobe_width_Y, discr_param)
+        radar_image += sinc_target
+    
+    peak_signal_power = np.max(np.abs(radar_image))**2
+    noise_power = peak_sower / (10**(snr_db/10))
+    noise_std = np.sqrt(noise_power / 2)
+    noise_real = np.random.normal(0, noise_std, image_size)
+    noise_imag = np.random.normal(0, noise_std, image_size)
+    complex_noise = noise_real + 1j * noise_imag
+    
+    radar_image_with_noise = radar_image + complex_noise
+    return radar_image_with_noise  # Возвращаем комплексное изображение
+
+                    """
+        plt.grid(True, alpha=0.3)
+    plt.show()
+
+def calculate_noise_threshold(radar_image, x_db=10):
+    """
+    Расчет порога обнаружения на основе мощности шума в области с распределением Релея.
+    """
+    # Находим область с распределением Релея
+    noise_window, noise_coords, ks_stat, scale = find_rayleigh_noise_region(radar_image)
+    
+    if noise_window is None:
+        # Резервный метод
+        noise_power = np.percentile(radar_image**2, 10)  # 10-й перцентиль мощности
+        print(f"Область с распределением Релея не найдена, используем 10-й перцентиль мощности: {noise_power:.6f}")
+    else:
+        # Вычисляем мощность шума (средний квадрат амплитуды)
+        noise_power = np.mean(noise_window**2)
+        print(f"Найдена область с распределением Релея: координаты {noise_coords}")
+        print(f"KS-статистика: {ks_stat:.4f}, параметр масштаба: {scale:.4f}")
+        print(f"Мощность шума: {noise_power:.6f}")
+        
+        # Визуализируем сравнение с распределением Релея
+        plot_rayleigh_comparison(noise_window, scale, noise_coords)
+    
+    # Вычисляем среднеквадратичное значение (амплитуду) шума
+    noise_rms = np.sqrt(noise_power)
+    
+    # Переводим в дБ и добавляем X дБ
+    noise_rms_db = 20 * np.log10(noise_rms + 1e-12)
+    threshold_db = noise_rms_db + x_db
+    threshold_linear = 10**(threshold_db/20)
+    
+    print(f"Среднеквадратичное значение шума: {noise_rms:.6f} ({noise_rms_db:.2f} дБ)")
+    print(f"Порог обнаружения: {threshold_linear:.6f} ({threshold_db:.2f} дБ)")
+    
+    return threshold_linear
+
+def find_targets(radar_image, min_distance, lobe_width_X, lobe_width_Y, discr_param, threshold_offset_db=10):
+    """
+    Обнаружение целей с правильным расчетом порога.
+    """
+    # Расчет порога
+    threshold = calculate_noise_threshold(radar_image, threshold_offset_db)
+    
+    print(f"Максимум изображения: {np.max(radar_image):.6f}")
+    print(f"Отношение максимум/порог: {np.max(radar_image)/threshold:.2f}")
+    
+    # Находим локальные максимумы
+    local_max = ndimage.maximum_filter(radar_image, size=min_distance) == radar_image
+    
+    # Применяем порог
+    above_threshold = radar_image > threshold
+    
+    # Объединяем условия
+    detected = local_max & above_threshold
+    
+    # Получаем координаты
+    peaks = np.where(detected)
+    peaks_coords = list(zip(peaks[0], peaks[1]))
+    
+    # Дополнительная фильтрация по интенсивности
+    filtered_peaks = []
+    for y, x in peaks_coords:
+        if radar_image[y, x] > threshold * 2.0:  # как минимум в 2 раза выше порога
+            filtered_peaks.append((y, x))
+    
+    print(f"Найдено кандидатов: {len(peaks_coords)}, после фильтрации: {len(filtered_peaks)}")
+    
+    return filtered_peaksimport numpy as np
 import matplotlib.pyplot as plt
 from scipy import ndimage
 import matplotlib
