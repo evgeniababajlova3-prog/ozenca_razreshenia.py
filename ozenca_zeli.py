@@ -590,7 +590,7 @@ def main():
 
     find_rayleigh_uniform_region(radar_image, window_size=(50, 50), num_samples=100)
 
-    threshold= calculate_noise_threshold(radar_image, x_db=10)м
+    threshold= calculate_noise_threshold(radar_image, x_db=10)
 
     detected_peaks = find_targets(radar_image, MIN_DISTANCE, THRESHOLD_OFFSET_DB)
     print(f"   Обнаружено целей: {len(detected_peaks)}")
