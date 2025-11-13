@@ -6,6 +6,7 @@ from analiz_sechenia import analiz_sechenia
 import os
 import subprocess
 import datetime
+from scipy import stats
 
 # Настройки для качественной визуализации
 matplotlib.rcParams['font.size'] = 10
@@ -74,6 +75,157 @@ def generate_radar_image(targets, image_size, lobe_width_X, lobe_width_Y, discr_
 
     radar_image_with_noise = radar_image + complex_noise
     return np.abs(radar_image_with_noise)
+
+
+def check_amplitude(amplitudes):
+    """
+    Проверяет соответствие амплитуд распределению Релея через сравнение гистограмм.
+    Возвращает только метрику MSE без визуализации.
+    """
+    # Оценка параметра σ для распределения Релея
+    sigma_est = np.sqrt(np.sum(amplitudes ** 2) / (2 * len(amplitudes)))
+
+    # Строим гистограмму амплитуд
+    hist, bin_edges = np.histogram(amplitudes, bins=30, density=True)
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+
+    # Вычисляем расхождение через MSE между гистограммой и теоретической PDF
+    theoretical_at_bins = stats.rayleigh.pdf(bin_centers, scale=sigma_est)
+    mse = np.mean((hist - theoretical_at_bins) ** 2)
+
+    return mse, sigma_est
+
+
+def check_phase(phases):
+    """
+    Проверяет равномерность распределения фаз через сравнение гистограмм.
+    """
+    # Нормализуем фазы к диапазону [0, 2π]
+    phases_normalized = phases % (2 * np.pi)
+
+    # Строим гистограмму фаз
+    hist, bin_edges = np.histogram(phases_normalized, bins=36, range=(0, 2 * np.pi), density=True)
+
+    # Вычисляем расхождение через MSE между гистограммой и равномерным распределением
+    uniform_pdf_value = 1 / (2 * np.pi)
+    uniform_pdf_array = np.full_like(hist, uniform_pdf_value)
+    mse = np.mean((hist - uniform_pdf_array) ** 2)
+
+    return mse
+
+
+def plot_amplitude_distribution(amplitudes, sigma_est=None):
+    """
+    Визуализирует распределение амплитуд и сравнивает с распределением Релея.
+    """
+    if sigma_est is None:
+        sigma_est = np.sqrt(np.sum(amplitudes ** 2) / (2 * len(amplitudes)))
+
+    # Строим гистограмму амплитуд
+    plt.figure(figsize=(10, 6))
+    hist, bin_edges, _ = plt.hist(amplitudes, bins=30, density=True, alpha=0.7,
+                                  label='Реальные амплитуды')
+
+    # Теоретическая плотность Релея
+    x = np.linspace(0, np.max(amplitudes), 100)
+    rayleigh_pdf = stats.rayleigh.pdf(x, scale=sigma_est)
+    plt.plot(x, rayleigh_pdf, 'r-', linewidth=2,
+             label=f'Теоретическое Релея (σ={sigma_est:.3f})')
+
+    plt.xlabel('Амплитуда')
+    plt.ylabel('Плотность вероятности')
+    plt.title('Сравнение с распределением Релея\n(для комплексного гауссовского шума)')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.show()
+
+
+def plot_phase_distribution(phases):
+    """
+    Визуализирует распределение фаз и сравнивает с равномерным распределением.
+    """
+    # Нормализуем фазы к диапазону [0, 2π]
+    phases_normalized = phases % (2 * np.pi)
+
+    # Теоретическая плотность равномерного распределения
+    uniform_pdf_value = 1 / (2 * np.pi)
+
+    # Строим гистограмму фаз
+    plt.figure(figsize=(10, 6))
+    plt.hist(phases_normalized, bins=36, range=(0, 2 * np.pi), density=True,
+             alpha=0.7, label='Реальные фазы')
+    plt.axhline(y=uniform_pdf_value, color='red', linestyle='-', linewidth=2,
+                label=f'Равномерное распределение (1/(2π) = {uniform_pdf_value:.4f})')
+
+    plt.xlabel('Фаза (рад)')
+    plt.ylabel('Плотность вероятности')
+    plt.title('Сравнение с равномерным распределением фаз\n(для комплексного гауссовского шума)')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.show()
+
+
+def find_rayleigh_uniform_region(radar_image_complex, window_size=(50, 50), num_samples=100):
+    """
+    Находит область, наиболее похожую на распределение Релея по амплитудам и равномерное по фазам.
+    Визуализирует распределения только для лучшей найденной области.
+    """
+
+    h, w = radar_image_complex.shape
+    window_h, window_w = window_size
+
+    best_match = float('inf')
+    best_window_complex = None
+    best_amplitudes = None
+    best_phases = None
+    best_sigma_est = None
+
+    print("Поиск шумовой области...")
+
+    for i in range(num_samples):
+        y_start = np.random.randint(0, h - window_h)
+        x_start = np.random.randint(0, w - window_w)
+
+        window_complex = radar_image_complex[y_start:y_start + window_h,
+                         x_start:x_start + window_w]
+
+        # Извлекаем амплитуды и фазы
+        amplitudes = np.abs(window_complex).flatten()
+        phases = np.angle(window_complex).flatten()
+
+        # Проверяем распределение амплитуд (без визуализации)
+        amp_mse, sigma_est = check_amplitude(amplitudes)
+
+        # Проверяем распределение фаз (без визуализации)
+        phase_mse = check_phase(phases)
+
+        # Комбинированная мера соответствия (чем меньше, тем лучше)
+        match_quality = amp_mse + phase_mse
+
+        if match_quality < best_match:
+            best_match = match_quality
+            best_window_complex = window_complex
+            best_amplitudes = amplitudes
+            best_phases = phases
+            best_sigma_est = sigma_est
+
+    # Визуализируем лучшую область
+    if best_amplitudes is not None and best_phases is not None:
+        amp_mse, _ = check_amplitude(best_amplitudes)
+        phase_mse = check_phase(best_phases)
+
+        print(f"\n--- ЛУЧШАЯ НАЙДЕННАЯ ОБЛАСТЬ ---")
+        print(f"Общее качество соответствия (MSE): {best_match:.6f}")
+        print(f"MSE амплитуд: {amp_mse:.6f}")
+        print(f"MSE фаз: {phase_mse:.6f}")
+        print(f"Оценка параметра Релея (σ): {best_sigma_est:.4f}")
+        print("Визуализация распределений для лучшей области:")
+
+        # ВИЗУАЛИЗАЦИЯ ТОЛЬКО ДЛЯ ЛУЧШЕЙ ОБЛАСТИ
+        plot_amplitude_distribution(best_amplitudes, best_sigma_est)
+        plot_phase_distribution(best_phases)
+
+    return best_window_complex, best_amplitudes, best_phases, best_match
 
 
 def find_noise_region(radar_image, window_size=(100, 100), num_samples=100):
@@ -436,7 +588,9 @@ def main():
     radar_image = generate_radar_image(TARGETS, IMAGE_SIZE, SINC_WIDTH_X, SINC_WIDTH_Y, DISCR_PARAM, SNR_DB)
     print(f"   Количество исходных целей: {len(TARGETS)}")
 
-    threshold= calculate_noise_threshold(radar_image, x_db=10)
+    find_rayleigh_uniform_region(radar_image, window_size=(50, 50), num_samples=100)
+
+    threshold= calculate_noise_threshold(radar_image, x_db=10)м
 
     detected_peaks = find_targets(radar_image, MIN_DISTANCE, THRESHOLD_OFFSET_DB)
     print(f"   Обнаружено целей: {len(detected_peaks)}")

@@ -14,7 +14,7 @@ def calculate_sidelobe_levels(t, signal_db):
     main_peak_val = signal_linear[main_peak_idx]
 
     # Находим все локальные минимумы (нули sinc функции)
-    minima_indices, _ = find_peaks(-signal_linear, height=-0.1, distance=5)
+    minima_indices, _ = find_peaks(-signal_linear, height=-0.1, distance=1)
 
     if len(minima_indices) < 2:
         print("Не удалось найти достаточное количество нулей функции")
