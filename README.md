@@ -1,4 +1,262 @@
-# === ПРОСТАЯ И ПОНЯТНАЯ ФУНКЦИЯ ОБНАРУЖЕНИЯ ЦЕЛЕЙ ===
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy import ndimage
+import json
+
+class RadiometricCalibration:
+    """
+    Класс для радиометрической калибровки РЛИ и оценки чувствительности
+    """
+    
+    def __init__(self):
+        self.calibration_coefficient = None
+        self.nesz_values = []
+        
+    def db_to_linear(self, db_value):
+        """Преобразование из дБ в линейные единицы"""
+        return 10 ** (db_value / 10)
+    
+    def linear_to_db(self, linear_value):
+        """Преобразование из линейных единиц в дБ"""
+        return 10 * np.log10(linear_value) if linear_value > 0 else -100
+    
+    def calculate_calibration_coefficient(self, E_mean_db, d_az, d_r, sigma_ref):
+        """
+        Расчет калибровочного коэффициента по формуле из документа
+        
+        Parameters:
+        E_mean_db: средняя энергия откликов в дБ
+        d_az: шаг дискретизации по азимуту [м]
+        d_r: шаг дискретизации по дальности [м] 
+        sigma_ref: расчетная ЭПР эталонных целей [м²]
+        """
+        # Преобразование энергии из дБ в линейные единицы
+        E_mean_linear = self.db_to_linear(E_mean_db)
+        
+        # Расчет калибровочного коэффициента по формуле из документа
+        K = (E_mean_linear * d_az * d_r) / sigma_ref
+        
+        self.calibration_coefficient = K
+        return K
+    
+    def calibrate_image(self, image_amplitude, noise_level_db=None):
+        """
+        Абсолютная радиометрическая калибровка РЛИ
+        
+        Parameters:
+        image_amplitude: амплитудное РЛИ (DN значения)
+        noise_level_db: уровень шумов в дБ (опционально)
+        """
+        if self.calibration_coefficient is None:
+            raise ValueError("Сначала рассчитайте калибровочный коэффициент")
+        
+        # Преобразование амплитуды в мощность
+        image_power = image_amplitude ** 2
+        
+        # Вычитание шумов если указан уровень шумов
+        if noise_level_db is not None:
+            noise_power = self.db_to_linear(noise_level_db)
+            image_power_corrected = np.maximum(image_power - noise_power, 0)
+        else:
+            image_power_corrected = image_power
+        
+        # Применение калибровочного коэффициента для получения УЭПР
+        sigma0_image = image_power_corrected / self.calibration_coefficient
+        
+        # Преобразование в дБ для удобства
+        sigma0_db = 10 * np.log10(np.maximum(sigma0_image, 1e-10))
+        
+        return sigma0_db, sigma0_image
+    
+    def find_shadow_regions(self, sigma0_db, method='threshold', threshold_db=-25):
+        """
+        Поиск участков радиолокационной тени на РЛИ
+        
+        Parameters:
+        sigma0_db: калиброванное РЛИ в дБ
+        method: метод поиска ('threshold' или 'morphological')
+        threshold_db: порог для метода threshold
+        """
+        if method == 'threshold':
+            # Простой пороговый метод
+            shadow_mask = sigma0_db < threshold_db
+            
+        elif method == 'morphological':
+            # Морфологический метод для поиска однородных темных областей
+            from skimage import morphology
+            
+            # Бинаризация по порогу
+            binary = sigma0_db < threshold_db
+            # Морфологическое закрытие для объединения близких областей
+            shadow_mask = morphology.binary_closing(binary, morphology.disk(3))
+            # Удаление маленьких объектов
+            shadow_mask = morphology.remove_small_objects(shadow_mask, min_size=100)
+        
+        return shadow_mask
+    
+    def calculate_nesz_from_shadows(self, sigma0_db, slant_ranges, shadow_regions):
+        """
+        Расчет радиометрической чувствительности (NESZ) по участкам тени
+        
+        Parameters:
+        sigma0_db: калиброванное РЛИ в дБ
+        slant_ranges: массив наклонных дальностей для каждого пикселя
+        shadow_regions: маска участков тени
+        """
+        if not np.any(shadow_regions):
+            raise ValueError("Не найдены участки радиолокационной тени")
+        
+        # Значения УЭПР в участках тени
+        shadow_sigma0 = sigma0_db[shadow_regions]
+        shadow_ranges = slant_ranges[shadow_regions]
+        
+        # Группировка по диапазонам наклонной дальности
+        range_bins = np.linspace(slant_ranges.min(), slant_ranges.max(), 20)
+        nesz_by_range = []
+        
+        for i in range(len(range_bins) - 1):
+            mask = (shadow_ranges >= range_bins[i]) & (shadow_ranges < range_bins[i + 1])
+            if np.sum(mask) > 0:
+                nesz_range = np.mean(shadow_sigma0[mask])
+                nesz_by_range.append((range_bins[i], nesz_range))
+        
+        # Наилучшее (минимальное) значение NESZ
+        best_nesz = np.min(shadow_sigma0)
+        
+        self.nesz_values = nesz_by_range
+        return best_nesz, nesz_by_range, shadow_sigma0, shadow_ranges
+    
+    def plot_nesz_vs_range(self, shadow_sigma0, shadow_ranges, theoretical_nesz=None):
+        """Построение графика зависимости УЭПР тени от наклонной дальности"""
+        plt.figure(figsize=(10, 6))
+        
+        # Точечный график измерений
+        plt.scatter(shadow_ranges, shadow_sigma0, alpha=0.6, label='Измерения в тенях')
+        
+        # Линия тренда
+        if len(shadow_ranges) > 1:
+            z = np.polyfit(shadow_ranges, shadow_sigma0, 1)
+            p = np.poly1d(z)
+            x_range = np.linspace(shadow_ranges.min(), shadow_ranges.max(), 100)
+            plt.plot(x_range, p(x_range), 'r-', label=f'Тренд: {z[0]:.3f}x + {z[1]:.1f}')
+        
+        # Теоретическая чувствительность если предоставлена
+        if theoretical_nesz is not None:
+            plt.axhline(y=theoretical_nesz, color='g', linestyle='--', 
+                       label=f'Теоретическая: {theoretical_nesz:.1f} дБ')
+        
+        plt.xlabel('Наклонная дальность, м')
+        plt.ylabel('УЭПР, дБ')
+        plt.title('Зависимость радиометрической чувствительности от наклонной дальности')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.show()
+        
+        return z[1] if len(shadow_ranges) > 1 else shadow_sigma0.mean()
+
+# Пример использования класса
+def demonstrate_calibration():
+    """Демонстрация работы алгоритма на примере данных из документа"""
+    
+    # Создаем экземпляр класса калибровки
+    calib = RadiometricCalibration()
+    
+    # Параметры для РЛИ F6_9 из документа
+    params_f6_9 = {
+        'E_mean_db': 106.7,      # дБ
+        'd_az': 0.088,           # м
+        'd_r': 0.208,            # м  
+        'sigma_ref': 268.5,      # м²
+        'wavelength': 0.03125,   # м (рассчитано из частоты 9600 МГц)
+        'flight_height': 507.8,  # м
+        'antenna_angle': 70      # градусов
+    }
+    
+    # Расчет калибровочного коэффициента
+    K = calib.calculate_calibration_coefficient(**params_f6_9)
+    print(f"Калибровочный коэффициент K = {K:.1f}")
+    
+    # Создаем синтетическое РЛИ для демонстрации
+    # В реальном применении здесь будет загрузка реальных данных
+    rows, cols = 15000, 5000
+    synthetic_image = generate_synthetic_radar_image(rows, cols)
+    
+    # Создаем массив наклонных дальностей
+    slant_ranges = generate_slant_ranges(rows, cols, params_f6_9['flight_height'])
+    
+    # Выполняем калибровку
+    sigma0_db, sigma0_linear = calib.calibrate_image(synthetic_image)
+    
+    # Находим участки тени
+    shadow_mask = calib.find_shadow_regions(sigma0_db, threshold_db=-25)
+    
+    # Оцениваем радиометрическую чувствительность
+    best_nesz, nesz_by_range, shadow_sigma0, shadow_ranges = \
+        calib.calculate_nesz_from_shadows(sigma0_db, slant_ranges, shadow_mask)
+    
+    print(f"Наилучшая радиометрическая чувствительность: {best_nesz:.1f} дБ")
+    
+    # Строим график
+    theoretical_nesz = -34.0  # Пример теоретического значения из документа
+    avg_nesz = calib.plot_nesz_vs_range(shadow_sigma0, shadow_ranges, theoretical_nesz)
+    
+    print(f"Средняя чувствительность по теням: {avg_nesz:.1f} дБ")
+    print(f"Разница с теоретической: {avg_nesz - theoretical_nesz:.1f} дБ")
+    
+    return calib, sigma0_db, shadow_mask
+
+def generate_synthetic_radar_image(rows, cols):
+    """Генерация синтетического РЛИ для демонстрации"""
+    # Базовый шум
+    image = np.random.rayleigh(scale=10, size=(rows, cols))
+    
+    # Добавляем цели (уголковые отражатели)
+    target_positions = [(500, 1000), (2000, 1500), (4000, 800)]
+    for pos in target_positions:
+        r, c = pos
+        image[r-5:r+5, c-5:c+5] += 1000  # Яркие цели
+        
+    # Добавляем участки тени (темные области)
+    shadow_regions = [(1000, 2000, 100, 100), (3000, 3000, 150, 150)]
+    for region in shadow_regions:
+        r, c, h, w = region
+        image[r:r+h, c:c+w] = np.random.rayleigh(scale=0.1, size=(h, w))
+    
+    return image
+
+def generate_slant_ranges(rows, cols, flight_height):
+    """Генерация массива наклонных дальностей"""
+    # Упрощенная модель геометрии съемки
+    near_range = 1000  # м
+    range_per_pixel = 0.2  # м/пиксель
+    
+    slant_ranges = np.zeros((rows, cols))
+    for r in range(rows):
+        for c in range(cols):
+            ground_range = near_range + c * range_per_pixel
+            slant_ranges[r, c] = np.sqrt(flight_height**2 + ground_range**2)
+    
+    return slant_ranges
+
+# Дополнительные утилиты для работы с реальными данными
+def load_calibration_targets(targets_file):
+    """Загрузка параметров калибровочных целей из файла"""
+    # В реальном применении здесь будет загрузка из CSV или JSON
+    targets = [
+        {'id': 'УО0', 'lat': 56.09647, 'lon': 35.883529, 'height': 176.7},
+        {'id': 'УО1', 'lat': 56.097229, 'lon': 35.883034, 'height': 176.9},
+        # ... остальные цели из таблицы 2.1
+    ]
+    return targets
+
+def calculate_target_epr(a, wavelength):
+    """Расчет ЭПР уголкового отражателя"""
+    # Формула из документа: σ_ref = (4/3) * π * (a^4 / λ^2)
+    return (4/3) * np.pi * (a**4 / wavelength**2)
+
+# Запуск демонстрации
+if __name__ == "__main__":
+    calib, calibrated_image, shadows = demonstrate_calibration()# === ПРОСТАЯ И ПОНЯТНАЯ ФУНКЦИЯ ОБНАРУЖЕНИЯ ЦЕЛЕЙ ===
 def find_targets_by_snr(radar_image_complex, noise_power, min_distance=MIN_DISTANCE, min_snr_db=MIN_SNR_DB):
     """
     Простое обнаружение целей: находим пики, выделяем окно, считаем SNR в окне
