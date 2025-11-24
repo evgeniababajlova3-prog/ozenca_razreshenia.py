@@ -1,29 +1,240 @@
-import numpy as np
-from scipy.integrate import trapezoid
-from scipy.signal import find_peaks
+  # === ИЗМЕНЕНИЕ: НОВЫЕ ПАРАМЕТРЫ ДЛЯ ОБНАРУЖЕНИЯ ПО SNR ===
+MIN_SNR_DB = 10  # Минимальный SNR для обнаружения цели в дБ
+MIN_DISTANCE = 500  # Минимальное расстояние между целями (пиксели)
 
-def calculate_sidelobe_levels(t, signal_db):
+# === ПЕРЕПИСАННАЯ ФУНКЦИЯ ОБНАРУЖЕНИЯ ЦЕЛЕЙ ПО SNR ===
+def find_targets_by_snr(radar_image_complex, noise_amplitudes, min_distance=MIN_DISTANCE, min_snr_db=MIN_SNR_DB):
     """
-    Улучшенная функция для расчета УБЛ, работает даже при обрезанных краях изображения
+    Обнаружение целей на основе SNR вместо абсолютного порога
+    
+    Parameters:
+    -----------
+    radar_image_complex : ndarray
+        Комплексное радиолокационное изображение
+    noise_amplitudes : ndarray
+        Амплитуды шумовой области для расчета мощности шума
+    min_distance : int
+        Минимальное расстояние между целями
+    min_snr_db : float
+        Минимальный SNR для обнаружения цели в дБ
+    
+    Returns:
+    --------
+    peaks_coords : list of tuples
+        Координаты обнаруженных целей (y, x)
+    snr_map : ndarray
+        Карта SNR для всего изображения (для отладки)
     """
     
-    # Конвертируем в линейную область для анализа
-    signal_linear = 10 ** (signal_db / 20)
+    # Вычисляем мощность шума
+    noise_power = np.mean(noise_amplitudes ** 2)
+    noise_rms = np.sqrt(noise_power)
+    
+    # Создаем карту амплитуд
+    amplitude_image = np.abs(radar_image_complex)
+    
+    # Вычисляем карту SNR (в дБ)
+    # SNR = 10 * log10(мощность_сигнала / мощность_шума)
+    power_image = amplitude_image ** 2
+    snr_linear = power_image / noise_power
+    snr_map = 10 * np.log10(snr_linear + 1e-12)  # защита от log(0)
+    
+    # Находим локальные максимумы на карте амплитуд
+    local_max = ndimage.maximum_filter(amplitude_image, size=min_distance) == amplitude_image
+    
+    # Применяем порог по SNR
+    above_snr_threshold = snr_map > min_snr_db
+    
+    # Комбинируем условия: локальные максимумы с достаточным SNR
+    detected = local_max & above_snr_threshold
+    
+    # Получаем координаты целей
+    peaks = np.where(detected)
+    peaks_coords = list(zip(peaks[0], peaks[1]))
+    
+    print(f"Обнаружено {len(peaks_coords)} целей с SNR > {min_snr_db} дБ")
+    print(f"Мощность шума: {noise_power:.6f}, RMS шума: {noise_rms:.6f}")
+    
+    # Отладочная информация
+    if len(peaks_coords) > 0:
+        snr_values = [snr_map[y, x] for y, x in peaks_coords]
+        print(f"SNR целей: min={min(snr_values):.2f} дБ, max={max(snr_values):.2f} дБ, mean={np.mean(snr_values):.2f} дБ")
+    
+    return peaks_coords, snr_map
 
-    # Находим главный максимум
-    main_peak_idx = np.argmax(signal_linear)
-    main_peak_val = signal_linear[main_peak_idx]
+def find_targets_by_peak_snr(radar_image_complex, noise_rms, min_distance=MIN_DISTANCE, min_snr_db=MIN_SNR_DB):
+    """
+    Альтернативный метод обнаружения по пиковому SNR
+    (отношение максимальной амплитуды в окне к RMS шума)
+    """
+    
+    amplitude_image = np.abs(radar_image_complex)
+    
+    # Находим локальные максимумы
+    local_max = ndimage.maximum_filter(amplitude_image, size=min_distance) == amplitude_image
+    
+    peaks = np.where(local_max)
+    peaks_coords = []
+    
+    for y, x in zip(peaks[0], peaks[1]):
+        # Вычисляем пиковый SNR для кандидата
+        peak_amplitude = amplitude_image[y, x]
+        peak_snr_db = 20 * np.log10(peak_amplitude / noise_rms)
+        
+        if peak_snr_db >= min_snr_db:
+            peaks_coords.append((y, x))
+    
+    print(f"Обнаружено {len(peaks_coords)} целей с пиковым SNR > {min_snr_db} дБ")
+    
+    return peaks_coords
 
-    # Находим все локальные минимумы
-    minima_indices, _ = find_peaks(-signal_linear, height=-0.1, distance=5)
+# === ОБНОВЛЕННАЯ ФУНКЦИЯ calculate_noise_threshold ===
+def calculate_noise_threshold(radar_image_complex, snr_threshold_db=MIN_SNR_DB):
+    """
+    Расчет параметров шума и порога обнаружения на основе SNR
+    
+    Returns:
+    --------
+    noise_rms : float
+        RMS шума
+    noise_power : float
+        Мощность шума  
+    noise_amplitudes : ndarray
+        Амплитуды шумовой области
+    """
+    
+    # Находим шумовую область
+    noise_window, noise_amplitudes, noise_phases, match_quality = find_rayleigh_uniform_region(radar_image_complex)
+    
+    if noise_amplitudes is None:
+        raise ValueError("Не удалось найти шумовую область для расчета SNR")
+    
+    # Вычисляем параметры шума
+    noise_power = np.mean(noise_amplitudes ** 2)
+    noise_rms = np.sqrt(noise_power)
+    
+    print(f"Параметры шума: мощность={noise_power:.6f}, RMS={noise_rms:.6f}")
+    print(f"Порог обнаружения: SNR > {snr_threshold_db} дБ")
+    
+    return noise_rms, noise_power, noise_amplitudes
 
-    if len(minima_indices) < 1:
-        print("Не удалось найти локальные минимумы")
-        return -80, -80
+# === ИНТЕГРАЦИЯ В ОСНОВНУЮ ФУНКЦИЮ main() ===
 
-    # Разделяем минимумы на левые и правые относительно главного максимума
-    left_minima = minima_indices[minima_indices < main_peak_idx]
-    right_minima = minima_indices[minima_indices > main_peak_idx]
+def main():
+    # Загрузка данных
+    radar_image_complex, radar_image = load_radar_image_from_hdf5(HDF5_FILE_PATH)
+    
+    # === ИЗМЕНЕНИЕ: Расчет параметров шума для SNR ===
+    print("=== РАСЧЕТ ПАРАМЕТРОВ ШУМА ДЛЯ SNR ===")
+    noise_rms, noise_power, noise_amplitudes = calculate_noise_threshold(radar_image_complex, MIN_SNR_DB)
+    
+    # === ИЗМЕНЕНИЕ: Обнаружение целей по SNR ===
+    print("=== ОБНАРУЖЕНИЕ ЦЕЛЕЙ ПО SNR ===")
+    detected_peaks, snr_map = find_targets_by_snr(radar_image_complex, noise_amplitudes, MIN_DISTANCE, MIN_SNR_DB)
+    
+    # Альтернативный метод (раскомментируйте если нужно):
+    # detected_peaks = find_targets_by_peak_snr(radar_image_complex, noise_rms, MIN_DISTANCE, MIN_SNR_DB)
+    
+    T_synth, F_r_discr, Full_velocity = read_radar_params_from_json(JSON_FILE_PATH)
+    
+    targets_data = []
+    
+    for i, target_yx in enumerate(detected_peaks):
+        # Выделяем комплексное окно для цели
+        window_complex = extract_target_window(radar_image_complex, target_yx, WINDOW_SIZE)
+        window_amplitude = np.abs(window_complex)
+        
+        # === ДОБАВЛЕНИЕ: Расчет различных метрик SNR ===
+        # Средний SNR по окну
+        window_power = np.mean(window_amplitude ** 2)
+        snr_db = 10 * np.log10(window_power / noise_power)
+        
+        # Пиковый SNR
+        peak_amplitude = np.max(window_amplitude)
+        snr_peak_db = 20 * np.log10(peak_amplitude / noise_rms)
+        
+        # SNR в точке максимума из карты SNR
+        snr_at_peak = snr_map[target_yx[0], target_yx[1]]
+        
+        print(f"Цель {i+1}: SNR_окно={snr_db:.2f} дБ, SNR_пик={snr_peak_db:.2f} дБ, SNR_карта={snr_at_peak:.2f} дБ")
+        
+        # Извлечение сечений из амплитудного окна
+        horizontal_section, vertical_section = extract_sections(window_amplitude)
+        
+        # Анализ сечений
+        t_h, h_signal_db, h_signal_linear = generate_sinc_signal_from_section(horizontal_section, WINDOW_SIZE[0])
+        h_results = analiz_sechenia(t_h, h_signal_db, WINDOW_SIZE[0] / 2)
+        
+        t_v, v_signal_db, v_signal_linear = generate_sinc_signal_from_section(vertical_section, WINDOW_SIZE[1])
+        v_results = analiz_sechenia(t_v, v_signal_db, WINDOW_SIZE[1] / 2)
+        
+        # Формируем данные для отчета
+        target_data = {
+            'window_linear': window_amplitude,
+            'window_complex': window_complex,
+            'snr_db': snr_db,                    # Средний SNR по окну
+            'snr_peak_db': snr_peak_db,          # Пиковый SNR
+            'snr_map_db': snr_at_peak,           # SNR из карты в точке максимума
+            'h_t': t_h,
+            'h_signal_db': h_signal_db,
+            'h_wl': h_results.get('wl'),
+            'h_wr': h_results.get('wr'),
+            'h_width': h_results.get('measured_width', 0),
+            'h_pslr': h_results.get('classical_pslr', -80),
+            'h_i_pslr': h_results.get('integral_pslr', -80),
+            'h_sinc_interp': h_results.get('sinc_interp'),
+            'h_t_interp': h_results.get('t_interp'),
+            'v_t': t_v,
+            'v_signal_db': v_signal_db,
+            'v_wl': v_results.get('wl'),
+            'v_wr': v_results.get('wr'),
+            'v_width': v_results.get('measured_width', 0),
+            'v_pslr': v_results.get('classical_pslr', -80),
+            'v_i_pslr': v_results.get('integral_pslr', -80),
+            'v_sinc_interp': v_results.get('sinc_interp'),
+            'v_t_interp': v_results.get('t_interp'),
+        }
+        targets_data.append(target_data)
+    
+    # === ДОПОЛНИТЕЛЬНАЯ ВИЗУАЛИЗАЦИЯ: Карта SNR ===
+    plt.figure(figsize=(12, 8))
+    plt.imshow(snr_map, cmap="jet", aspect='auto')
+    plt.colorbar(label='SNR (дБ)')
+    plt.title('Карта SNR радиолокационного изображения')
+    
+    # Отмечаем обнаруженные цели
+    for i, (y, x) in enumerate(detected_peaks):
+        plt.plot(x, y, 's', markersize=12, markeredgewidth=2, 
+                markeredgecolor='red', markerfacecolor='none', linestyle='none',
+                label='Цели' if i == 0 else "")
+    
+    plt.legend()
+    snr_map_path = os.path.join(result_folder, "snr_map.png")
+    plt.savefig(snr_map_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    # ... остальная часть main без изменений до генерации отчетов ...
+    
+    # === ИЗМЕНЕНИЕ В ОТЧЕТЕ: Добавляем информацию о SNR и методе обнаружения ===
+    
+    # В текстовом отчете о параметрах
+    with open(os.path.join(result_folder, "radar_params.txt"), 'w', encoding='utf-8') as f:
+        f.write(f"Название голограммы: {HOLOGRAM_NAME}\n")
+        f.write(f"Размер голограммы: {radar_image.shape[1]} × {radar_image.shape[0]} пикселей\n")
+        f.write(f"Количество целей: {len(detected_peaks)}\n")
+        f.write(f"Метод обнаружения: по SNR (порог: {MIN_SNR_DB} дБ)\n")
+        f.write(f"Мощность шума: {noise_power:.6f}\n")
+        f.write(f"RMS шума: {noise_rms:.6f}\n")
+        f.write(f"Максимальная амплитуда РЛИ: {np.max(radar_image):.6f}\n")
+        f.write(f"Минимальная амплитуда РЛИ: {np.min(radar_image):.6f}\n")
+        f.write(f"Средняя амплитуда РЛИ: {np.mean(radar_image):.6f}\n")
+    
+    # В отчетах для каждой цели
+    for i, target_data in enumerate(targets_data):
+        target_id = i + 1
+        target_coords = detected_peaks[i]
+        
+        with  right_minima = minima_indices[minima_indices > main_peak_idx]
 
     # ИЗМЕНЕНИЕ 1: Определяем границы главного лепестка с учетом краев
     if len(left_minima) == 0:
