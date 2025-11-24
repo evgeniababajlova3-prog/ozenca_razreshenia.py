@@ -1,4 +1,345 @@
-import numpy as np
+# ===== ДОБАВЛЕНИЕ РАДИОМЕТРИЧЕСКОЙ КАЛИБРОВКИ =====
+
+def read_calibration_params_from_json(json_path):
+    """Чтение параметров калибровки из JSON файла"""
+    try:
+        with open(json_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        calibration_params = {}
+        
+        # Параметры для калибровки
+        calibration_params['wavelength'] = data['imaging_params']['wavelength']
+        calibration_params['carrier_freq'] = data['imaging_params']['carrier_freq']
+        calibration_params['range_bandwidth'] = data['imaging_params']['range_bandwidth']
+        calibration_params['prf'] = data['imaging_params']['prf']
+        calibration_params['pri'] = data['imaging_params']['pri']
+        
+        # Параметры съемки для вычисления шагов дискретизации
+        calibration_params['output_samp_rate'] = data['image_description']['output_samp_rate']
+        calibration_params['output_prf'] = data['image_description']['output_prf']
+        calibration_params['num_lines'] = data['image_description']['num_lines']
+        calibration_params['num_cols'] = data['image_description']['num_cols']
+        
+        return calibration_params
+        
+    except Exception as e:
+        print(f"Ошибка чтения параметров калибровки из JSON: {e}")
+        return {}
+
+def calculate_calibration_parameters(radar_image_complex, calibration_params, target_data=None):
+    """Вычисление калибровочных параметров"""
+    
+    # Шаги дискретизации в метрах
+    range_step = c / (2 * calibration_params['output_samp_rate'])
+    azimuth_step = calibration_params['wavelength'] / (2 * calibration_params['output_prf'] * calibration_params['pri'])
+    
+    # Расчетная ЭПР для калибровочных целей (из документации)
+    calculated_rcs = 268.5  # м² для уголковых отражателей с ребром 0.5 м
+    
+    # Средняя энергия откликов (если есть данные о целях)
+    if target_data and 'window_linear' in target_data:
+        target_energy = np.mean(target_data['window_linear'] ** 2)
+        target_energy_db = 10 * np.log10(target_energy)
+    else:
+        # Используем среднюю энергию по изображению
+        target_energy = np.mean(np.abs(radar_image_complex) ** 2)
+        target_energy_db = 10 * np.log10(target_energy)
+    
+    # Калибровочный коэффициент
+    calibration_constant = (target_energy * range_step * azimuth_step) / calculated_rcs
+    
+    calib_params = {
+        'range_step': range_step,
+        'azimuth_step': azimuth_step,
+        'calculated_rcs': calculated_rcs,
+        'target_energy_db': target_energy_db,
+        'calibration_constant': calibration_constant
+    }
+    
+    return calib_params
+
+def convert_to_sigma0(amplitude, calibration_params):
+    """Преобразование амплитуды в удельную ЭПР (σ⁰)"""
+    power = amplitude ** 2
+    sigma0 = (power * calibration_params['range_step'] * calibration_params['azimuth_step']) / calibration_params['calibration_constant']
+    sigma0_db = 10 * np.log10(sigma0)
+    return sigma0_db
+
+def find_shadow_regions(radar_image_db, min_region_size=50, shadow_threshold_db=-25):
+    """Автоматическое обнаружение участков радиолокационной тени"""
+    
+    # Преобразуем в децибелы если нужно
+    if np.max(radar_image_db) > 100:  # предположим, что в линейной шкале
+        radar_image_db = 20 * np.log10(radar_image_db + 1e-12)
+    
+    # Находим регионы с низкой интенсивностью (тени)
+    shadow_mask = radar_image_db < shadow_threshold_db
+    
+    # Метка связных компонентов
+    labeled_array, num_features = ndimage.label(shadow_mask)
+    
+    shadow_regions = []
+    
+    for i in range(1, num_features + 1):
+        region_mask = labeled_array == i
+        region_indices = np.where(region_mask)
+        
+        if len(region_indices[0]) >= min_region_size:
+            y_min, y_max = np.min(region_indices[0]), np.max(region_indices[0])
+            x_min, x_max = np.min(region_indices[1]), np.max(region_indices[1])
+            
+            # Вычисляем среднюю УЭПР в регионе
+            region_values = radar_image_db[region_mask]
+            mean_sigma0 = np.mean(region_values)
+            
+            shadow_regions.append({
+                'y_start': y_min,
+                'y_end': y_max,
+                'x_start': x_min,
+                'x_end': x_max,
+                'mean_sigma0_db': mean_sigma0,
+                'size': len(region_indices[0])
+            })
+    
+    return shadow_regions
+
+def calculate_radiometric_sensitivity(shadow_regions, calibration_params):
+    """Оценка радиометрической чувствительности по участкам тени"""
+    
+    if not shadow_regions:
+        return None
+    
+    # Берем наилучшее значение (минимальную УЭПР) из участков тени
+    sensitivity_db = min(region['mean_sigma0_db'] for region in shadow_regions)
+    
+    # Корректируем с учетом калибровочных параметров
+    corrected_sensitivity = sensitivity_db - calibration_params['target_energy_db'] + 10 * np.log10(calibration_params['calibration_constant'])
+    
+    return {
+        'raw_sensitivity_db': sensitivity_db,
+        'corrected_sensitivity_db': corrected_sensitivity,
+        'shadow_regions_count': len(shadow_regions),
+        'shadow_regions': shadow_regions
+    }
+
+def plot_shadow_regions_analysis(radar_image_db, shadow_regions, sensitivity_results, result_folder):
+    """Визуализация анализа участков тени и чувствительности"""
+    
+    plt.figure(figsize=(12, 8))
+    
+    # Отображаем РЛИ в dB
+    plt.imshow(radar_image_db, cmap='gray', vmin=-40, vmax=10)
+    plt.colorbar(label='УЭПР (дБ)')
+    plt.title('Участки радиолокационной тени для оценки чувствительности')
+    
+    # Отмечаем участки тени
+    for i, region in enumerate(shadow_regions):
+        y_center = (region['y_start'] + region['y_end']) / 2
+        x_center = (region['x_start'] + region['x_end']) / 2
+        
+        # Рисуем прямоугольник вокруг региона
+        height = region['y_end'] - region['y_start']
+        width = region['x_end'] - region['x_start']
+        rect = plt.Rectangle((region['x_start'], region['y_start']), width, height, 
+                           fill=False, edgecolor='red', linewidth=1)
+        plt.gca().add_patch(rect)
+        
+        # Подписываем регион
+        plt.text(x_center, y_center, f"{region['mean_sigma0_db']:.1f} дБ", 
+                color='red', fontsize=8, ha='center', va='center',
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.7))
+    
+    # Добавляем информацию о чувствительности
+    if sensitivity_results:
+        plt.figtext(0.02, 0.98, f"Радиометрическая чувствительность: {sensitivity_results['corrected_sensitivity_db']:.2f} дБ", 
+                   fontsize=12, color='white', weight='bold',
+                   bbox=dict(boxstyle="round,pad=0.5", facecolor="red", alpha=0.8))
+    
+    plt.tight_layout()
+    shadow_plot_path = os.path.join(result_folder, "radiometric_sensitivity_analysis.png")
+    plt.savefig(shadow_plot_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    return shadow_plot_path
+
+# ===== МОДИФИКАЦИЯ ОСНОВНОЙ ФУНКЦИИ =====
+
+def main():
+    # Загрузка данных
+    radar_image_complex, radar_image = load_radar_image_from_hdf5(HDF5_FILE_PATH)
+    
+    # Чтение параметров съемки и калибровки
+    T_synth, F_r_discr, Full_velocity = read_radar_params_from_json(JSON_FILE_PATH)
+    calibration_params = read_calibration_params_from_json(JSON_FILE_PATH)
+    
+    # Вычисление калибровочных параметров
+    calib_params = calculate_calibration_parameters(radar_image_complex, calibration_params)
+    
+    # Обнаружение целей
+    detected_peaks = find_targets(radar_image, MIN_DISTANCE, THRESHOLD_OFFSET_DB)
+    
+    # Анализ радиометрической чувствительности
+    radar_image_db = 20 * np.log10(radar_image + 1e-12)
+    shadow_regions = find_shadow_regions(radar_image_db)
+    sensitivity_results = calculate_radiometric_sensitivity(shadow_regions, calib_params)
+    
+    # Визуализация анализа чувствительности
+    shadow_plot_path = plot_shadow_regions_analysis(radar_image_db, shadow_regions, sensitivity_results, result_folder)
+    
+    targets_data = []
+
+    for i, target_yx in enumerate(detected_peaks):
+        # ... существующий код анализа целей ...
+        
+        # ДОБАВЛЯЕМ РАДИОМЕТРИЧЕСКИЕ ПАРАМЕТРЫ
+        target_window_db = 20 * np.log10(np.abs(window) + 1e-12)
+        target_mean_sigma0 = np.mean(target_window_db)
+        target_max_sigma0 = np.max(target_window_db)
+        
+        target_data.update({
+            'mean_sigma0_db': target_mean_sigma0,
+            'max_sigma0_db': target_max_sigma0,
+            'calibrated_mean_sigma0': convert_to_sigma0(np.mean(window), calib_params),
+            'calibrated_max_sigma0': convert_to_sigma0(np.max(window), calib_params)
+        })
+        
+        targets_data.append(target_data)
+
+    # ===== ДОБАВЛЕНИЕ РАДИОМЕТРИЧЕСКОЙ ИНФОРМАЦИИ В ОТЧЕТ =====
+    
+    with open(os.path.join(result_folder, "radar_params.txt"), 'w', encoding='utf-8') as f:
+        f.write(f"Название голограммы: {HOLOGRAM_NAME}\n")
+        f.write(f"Размер голограммы: {radar_image.shape[1]} × {radar_image.shape[0]} пикселей\n")
+        f.write(f"Количество целей: {len(detected_peaks)}\n")
+        
+        # Радиометрические параметры
+        f.write("\n=== РАДИОМЕТРИЧЕСКИЕ ПАРАМЕТРЫ ===\n")
+        f.write(f"Шаг по дальности: {calib_params['range_step']:.6f} м\n")
+        f.write(f"Шаг по азимуту: {calib_params['azimuth_step']:.6f} м\n")
+        f.write(f"Средняя энергия целей: {calib_params['target_energy_db']:.2f} дБ\n")
+        f.write(f"Калибровочный коэффициент: {calib_params['calibration_constant']:.2f}\n")
+        
+        if sensitivity_results:
+            f.write(f"Радиометрическая чувствительность: {sensitivity_results['corrected_sensitivity_db']:.2f} дБ\n")
+            f.write(f"Количество участков тени: {sensitivity_results['shadow_regions_count']}\n")
+            f.write(f"Лучшая УЭПР тени: {sensitivity_results['raw_sensitivity_db']:.2f} дБ\n")
+        
+        f.write(f"Максимальная амплитуда РЛИ: {np.max(radar_image):.6f}\n")
+        f.write(f"Минимальная амплитуда РЛИ: {np.min(radar_image):.6f}\n")
+        f.write(f"Средняя амплитуда РЛИ: {np.mean(radar_image):.6f}\n")
+
+    # ===== ОБНОВЛЕНИЕ TYPST-ОТЧЕТА =====
+    
+    typ_content = f"""
+    #set_page(width: auto, height: auto, margin: 1.5cm)
+    #set text(font: "New Computer Modern", size: 12pt, lang: "ru")
+    #show heading: set text(weight: "bold")
+
+    #align(center)[
+    #text(size: 24pt, weight: "bold")[Анализ радиолокационного изображения]
+    ]
+
+    #align(center)[
+    #text(size: 12pt)[Голограмма: {HOLOGRAM_NAME}]
+    ]
+
+    #align(center)[
+    #text(size: 12pt)[Размер голограммы: {radar_image.shape[1]} × {radar_image.shape[0]} пикселей, количество целей: {len(detected_peaks)}]
+    ]
+
+    // Радиометрические параметры
+    #align(center)[
+    #table(
+        columns: 2,
+        align: center,
+        stroke: (x: 0.5pt, y: 0.5pt),
+        inset: 5pt,
+        [*Параметр*], [*Значение*],
+        [Шаг по дальности], [{calib_params['range_step']:.6f} м],
+        [Шаг по азимуту], [{calib_params['azimuth_step']:.6f} м],
+        [Средняя энергия целей], [{calib_params['target_energy_db']:.2f} дБ],
+        [Калибровочный коэффициент], [{calib_params['calibration_constant']:.2f}],
+    )
+    ]
+
+    // Радиометрическая чувствительность
+    #align(center)[
+    #table(
+        columns: 2,
+        align: center,
+        stroke: (x: 0.5pt, y: 0.5pt),
+        inset: 5pt,
+        [*Параметр чувствительности*], [*Значение*],
+        [Радиометрическая чувствительность], [{"%.2f" % sensitivity_results['corrected_sensitivity_db'] if sensitivity_results else "N/A"} дБ],
+        [Количество участков тени], [{sensitivity_results['shadow_regions_count'] if sensitivity_results else "N/A"}],
+        [Лучшая УЭПР тени], [{"%.2f" % sensitivity_results['raw_sensitivity_db'] if sensitivity_results else "N/A"} дБ],
+    )
+    ]
+
+    #align(center)[
+    #figure(
+        image("radar_image.png"),
+        caption: [Радиолокационное изображение с обнаруженными целями]
+    )
+    ]
+
+    #align(center)[
+    #figure(
+        image("radiometric_sensitivity_analysis.png"),
+        caption: [Анализ радиометрической чувствительности по участкам тени]
+    )
+    ]
+    """
+
+    # ... остальная часть существующего кода для генерации отчета ...
+
+# ===== ИСПРАВЛЕНИЕ ПРОБЛЕМ С JSON =====
+
+def read_radar_params_from_json(json_path):
+    """Чтение параметров съемки из JSON файла (ИСПРАВЛЕННАЯ ВЕРСИЯ)"""
+    try:
+        with open(json_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        # Извлекаем временные метки
+        first_time_str = data['image_description']['first_line_azimuth_time']
+        last_time_str = data['image_description']['last_line_azimuth_time']
+
+        # Преобразуем в datetime объекты
+        first_time = datetime.fromisoformat(first_time_str.replace('Z', '+00:00'))
+        last_time = datetime.fromisoformat(last_time_str.replace('Z', '+00:00'))
+
+        # Вычисляем время синтеза в секундах
+        synthesis_time = (last_time - first_time).total_seconds()
+
+        # Извлекаем частоту дискретизации
+        f_r_discr = data['imaging_params']['samp_rate']
+
+        velocities = data.get('velocities_enu', {})
+        
+        # ИСПРАВЛЕНИЕ: проверяем наличие данных о скоростях
+        vx = velocities.get('vx', [])
+        vy = velocities.get('vy', [])
+        vz = velocities.get('vz', [])
+
+        # Вычисляем средние значения только если массивы не пустые
+        avg_vx = np.mean(vx) if len(vx) > 0 else 0
+        avg_vy = np.mean(vy) if len(vy) > 0 else 0
+        avg_vz = np.mean(vz) if len(vz) > 0 else 0
+
+        # Вычисляем полную скорость (модуль вектора)
+        full_velocity = np.sqrt(avg_vx ** 2 + avg_vy ** 2 + avg_vz ** 2)
+
+        return synthesis_time, f_r_discr, full_velocity
+
+    except Exception as e:
+        print(f"Ошибка чтения JSON файла: {e}")
+        raise
+
+# Запуск основной функции
+if __name__ == "__main__":
+    main()import numpy as np
 import matplotlib.pyplot as plt
 from scipy import ndimage
 import json
