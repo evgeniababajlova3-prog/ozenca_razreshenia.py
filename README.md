@@ -1,4 +1,101 @@
 import numpy as np
+from scipy.integrate import trapezoid
+from scipy.signal import find_peaks
+
+def calculate_sidelobe_levels(t, signal_db):
+    """
+    Улучшенная функция для расчета УБЛ, работает даже при обрезанных краях изображения
+    """
+    
+    # Конвертируем в линейную область для анализа
+    signal_linear = 10 ** (signal_db / 20)
+
+    # Находим главный максимум
+    main_peak_idx = np.argmax(signal_linear)
+    main_peak_val = signal_linear[main_peak_idx]
+
+    # Находим все локальные минимумы
+    minima_indices, _ = find_peaks(-signal_linear, height=-0.1, distance=5)
+
+    if len(minima_indices) < 1:
+        print("Не удалось найти локальные минимумы")
+        return -80, -80
+
+    # Разделяем минимумы на левые и правые относительно главного максимума
+    left_minima = minima_indices[minima_indices < main_peak_idx]
+    right_minima = minima_indices[minima_indices > main_peak_idx]
+
+    # ИЗМЕНЕНИЕ 1: Определяем границы главного лепестка с учетом краев
+    if len(left_minima) == 0:
+        # Если нет левых минимумов, берем начало сигнала как левую границу
+        left_zero_idx = 0
+        print("Левый ноль не найден, используем начало сигнала")
+    else:
+        left_zero_idx = left_minima[-1]  # последний ноль слева
+
+    if len(right_minima) == 0:
+        # Если нет правых минимумов, берем конец сигнала как правую границу
+        right_zero_idx = len(signal_linear) - 1
+        print("Правый ноль не найден, используем конец сигнала")
+    else:
+        right_zero_idx = right_minima[0]  # первый ноль справа
+
+    # Главный лепесток - между этими нулями
+    main_lobe_indices = range(left_zero_idx, right_zero_idx + 1)
+    main_lobe = signal_linear[main_lobe_indices]
+    t_main = t[main_lobe_indices]
+
+    # ИЗМЕНЕНИЕ 2: Боковые лепестки - все что осталось, даже если только с одной стороны
+    sidelobe_indices = []
+    
+    # Левые боковые лепестки (если есть)
+    if left_zero_idx > 0:
+        sidelobe_indices.extend(np.arange(0, left_zero_idx))
+    
+    # Правые боковые лепестки (если есть)  
+    if right_zero_idx < len(signal_linear) - 1:
+        sidelobe_indices.extend(np.arange(right_zero_idx + 1, len(signal_linear)))
+    
+    sidelobe_indices = np.array(sidelobe_indices)
+    
+    if len(sidelobe_indices) == 0:
+        print("Боковые лепестки не обнаружены (возможно, весь сигнал - главный лепесток)")
+        return -80, -80
+
+    sidelobes = signal_linear[sidelobe_indices]
+    t_sidelobes = t[sidelobe_indices]
+
+    # ИЗМЕНЕНИЕ 3: Классический УБЛ - отношение максимального бокового лепестка к главному
+    if len(sidelobes) > 0:
+        max_sidelobe = np.max(sidelobes)
+        classical_pslr_db = 20 * np.log10(max_sidelobe / main_peak_val)
+    else:
+        classical_pslr_db = -80
+
+    # ИЗМЕНЕНИЕ 4: Интегральный УБЛ - отношение мощностей (работает даже с частичными данными)
+    if len(main_lobe) > 0 and len(sidelobes) > 0:
+        power_main = trapezoid(main_lobe ** 2, t_main)
+        power_sidelobes = trapezoid(sidelobes ** 2, t_sidelobes)
+        
+        # Если один из боковых лепестков отсутствует, делаем поправку
+        left_sidelobes_present = left_zero_idx > 0
+        right_sidelobes_present = right_zero_idx < len(signal_linear) - 1
+        
+        if not left_sidelobes_present or not right_sidelobes_present:
+            # Если отсутствует один из боковых лепестков, предполагаем симметрию для оценки
+            print(f"УБЛ рассчитан для частичных данных: левый={left_sidelobes_present}, правый={right_sidelobes_present}")
+            # Можно добавить коэффициент коррекции, но пока просто используем как есть
+        
+        integral_pslr_db = 10 * np.log10(power_sidelobes / power_main)
+    else:
+        integral_pslr_db = -80
+
+    # ИЗМЕНЕНИЕ 5: Дополнительная диагностика
+    print(f"Главный лепесток: отсчеты {left_zero_idx}-{right_zero_idx}, "
+          f"боковые лепестки: {len(sidelobes)} отсчетов")
+    
+    # Визуализация для отладки (можно закомментировать в финальной версии)
+    if False:  # Поставьте True для отладкиimport numpy as np
 import matplotlib.pyplot as plt
 from scipy.interpolate import CubicSpline
 from scipy.signal import firwin, lfilter
