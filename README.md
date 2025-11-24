@@ -1,4 +1,121 @@
+# === ПРАВИЛЬНАЯ ФУНКЦИЯ ОБНАРУЖЕНИЯ ЦЕЛЕЙ С УСРЕДНЕНИЕМ МОЩНОСТИ ===
+def find_targets_by_snr(radar_image_complex, noise_power, min_distance=MIN_DISTANCE, min_snr_db=MIN_SNR_DB, power_window_size=(5, 5)):
+    """
+    Обнаружение целей на основе усредненной мощности сигнала
     
+    Parameters:
+    -----------
+    radar_image_complex : ndarray
+        Комплексное радиолокационное изображение
+    noise_power : float
+        СРЕДНЯЯ мощность шума
+    min_distance : int
+        Минимальное расстояние между целями
+    min_snr_db : float
+        Минимальный SNR для обнаружения цели в дБ
+    power_window_size : tuple
+        Размер окна для усреднения мощности сигнала
+        
+    Returns:
+    --------
+    peaks_coords : list of tuples
+        Координаты обнаруженных целей (y, x)
+    snr_map : ndarray
+        Карта SNR для всего изображения
+    """
+    
+    # === ПРАВИЛЬНЫЙ РАСЧЕТ: Усредняем мощность по окну ===
+    
+    # 1. Мгновенная мощность каждого пикселя
+    instantaneous_power = np.abs(radar_image_complex) ** 2
+    
+    # 2. Усредняем мощность по окну - это СРЕДНЯЯ мощность в окрестности
+    averaged_power = ndimage.uniform_filter(instantaneous_power, size=power_window_size)
+    
+    # 3. Расчет SNR: средняя мощность сигнала / средняя мощность шума
+    snr_linear = averaged_power / noise_power
+    
+    # 4. SNR в дБ
+    snr_map = 10 * np.log10(np.maximum(snr_linear, 1e-12))
+    
+    # === ОБНАРУЖЕНИЕ ЛОКАЛЬНЫХ МАКСИМУМОВ НА КАРТЕ SNR ===
+    
+    # Ищем локальные максимумы на карте усредненного SNR
+    local_max_snr = ndimage.maximum_filter(snr_map, size=min_distance) == snr_map
+    
+    # Применяем порог по SNR
+    above_snr_threshold = snr_map > min_snr_db
+    
+    # Комбинируем условия: локальные максимумы SNR с достаточным SNR
+    detected = local_max_snr & above_snr_threshold
+    
+    # Получаем координаты целей
+    peaks = np.where(detected)
+    peaks_coords = list(zip(peaks[0], peaks[1]))
+    
+    print(f"Обнаружено {len(peaks_coords)} целей с усредненным SNR > {min_snr_db} дБ")
+    print(f"Размер окна усреднения мощности: {power_window_size}")
+    print(f"Мощность шума: {noise_power:.6f}")
+    
+    # Отладочная информация
+    if len(peaks_coords) > 0:
+        snr_values = [snr_map[y, x] for y, x in peaks_coords]
+        power_values = [averaged_power[y, x] for y, x in peaks_coords]
+        
+        print(f"SNR целей: min={min(snr_values):.2f} дБ, max={max(snr_values):.2f} дБ, mean={np.mean(snr_values):.2f} дБ")
+        print(f"Мощность целей: min={min(power_values):.6f}, max={max(power_values):.6f}")
+    
+    return peaks_coords, snr_map
+
+# === ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ РАСЧЕТА SNR ЦЕЛИ ===
+def calculate_snr_for_target(window_complex, noise_power):
+    """
+    Расчет среднего SNR для цели (согласовано с обнаружением)
+    
+    Parameters:
+    -----------
+    window_complex : ndarray
+        Комплексное окно вокруг цели  
+    noise_power : float
+        СРЕДНЯЯ мощность шума
+        
+    Returns:
+    --------
+    snr_db : float
+        SNR в дБ
+    """
+    
+    # СРЕДНЯЯ мощность сигнала в окне цели
+    target_amplitudes = np.abs(window_complex).flatten()
+    signal_power = np.mean(target_amplitudes ** 2)  # СРЕДНЯЯ мощность!
+    
+    # SNR в линейной области
+    snr_linear = signal_power / noise_power
+    
+    # SNR в дБ
+    snr_db = 10 * np.log10(snr_linear)
+    
+    return snr_db
+
+# === ОБНОВЛЕННЫЙ ВЫЗОВ В MAIN() ===
+def main():
+    # ... загрузка данных ...
+    
+    # Расчет параметров шума (должна возвращать СРЕДНЮЮ мощность шума)
+    noise_rms, noise_power, noise_amplitudes = calculate_noise_threshold(radar_image_complex)
+    
+    # === ИСПРАВЛЕННЫЙ ВЫЗОВ: Обнаружение по усредненной мощности ===
+    detected_peaks, snr_map = find_targets_by_snr(
+        radar_image_complex, 
+        noise_power, 
+        MIN_DISTANCE, 
+        MIN_SNR_DB, 
+        power_window_size=(5, 5)  # Можно настроить: (3,3), (7,7), и т.д.
+    )
+    
+    # Обработка целей...
+    for i, target_yx in enumerate(detected_peaks):
+        window_complex = extract_target_window(radar_image    
     # # === ПРАВИЛЬНАЯ ФУНКЦИЯ ОБНАРУЖЕНИЯ ЦЕЛЕЙ ПО SNR ===
 def find_targets_by_snr(radar_image_complex, noise_power, min_distance=MIN_DISTANCE, min_snr_db=MIN_SNR_DB):
     """
