@@ -1,118 +1,181 @@
-import numpy as np
 
-def calculate_noise_threshold(radar_image_complex, x_db):
-    """Расчет порога на основе мощности шума с возвратом параметров шума для SNR"""
+############
+# РАДИОМЕТРИЧЕСКАЯ КАЛИБРОВКА И ЧУВСТВИТЕЛЬНОСТЬ
+############
 
-    # Находим шумовую область
-    noise_window, amplitudes, phases, match_quality = find_rayleigh_uniform_region(radar_image_complex)
-
-    # Вычисляем мощность шума
-    noise_power = np.mean(amplitudes ** 2)
-
-    # Вычисляем среднеквадратичное значение шума
-    noise_rms = np.sqrt(noise_power)
-
-    # Устанавливаем порог
-    threshold_db = 20 * np.log10(noise_rms) + x_db
-    threshold_linear = 10 ** (threshold_db / 20)
-
-    # === ДОБАВЛЕНО: Возвращаем параметры шума для расчета SNR ===
-    return threshold_linear, noise_rms, noise_power, amplitudes
-
-# === ДОБАВЛЕНИЕ РАСЧЕТА SNR ===
-
-def calculate_snr_for_target(target_window_complex, noise_amplitudes):
+def calculate_calibration_coefficient(radar_image_complex, calibration_targets_coords,
+                                      sigma_ref, d_az, d_r, window_size=(128, 128)):
     """
-    Расчет SNR для цели
-
-    Parameters:
-    -----------
-    target_window_complex : ndarray
-        Комплексное окно вокруг цели
-    noise_amplitudes : ndarray  
-        Амплитуды шумовой области
-
-    Returns:
-    --------
-    snr_db : float
-        SNR в дБ
+    Расчет калибровочного коэффициента по эталонным целям
     """
+    calibration_energies = []
 
-    # Амплитуды цели
-    target_amplitudes = np.abs(target_window_complex).flatten()
+    for target_coords in calibration_targets_coords:
+        window = extract_target_window(radar_image_complex, target_coords, window_size)
+        window_energy = np.sum(np.abs(window) ** 2)
+        calibration_energies.append(window_energy)
 
-    # Мощность сигнала (средняя мощность в окне цели)
-    signal_power = np.mean(target_amplitudes ** 2)
+    # Усредненная энергия эталонных целей
+    E_mean_linear = np.mean(calibration_energies)
+    E_mean_db = 10 * np.log10(E_mean_linear)
 
-    # Мощность шума
-    noise_power = np.mean(noise_amplitudes ** 2)
+    # Расчет калибровочного коэффициента
+    K = E_mean_linear * d_az * d_r / sigma_ref
 
-    # SNR в линейной области
-    snr_linear = signal_power / noise_power
-
-    # SNR в дБ
-    snr_db = 10 * np.log10(snr_linear)
-
-    return snr_db
+    return K, E_mean_db
 
 
-def calculate_snr_peak(target_window_complex, noise_rms):
+def calculate_nesz(noise_power, K, d_az, d_r):
     """
-    Расчет пикового SNR (отношение максимальной амплитуды цели к RMS шума)
+    Расчет радиометрической чувствительности (NESZ)
     """
-    target_amplitudes = np.abs(target_window_complex)
-    peak_amplitude = np.max(target_amplitudes)
-    snr_peak_db = 20 * np.log10(peak_amplitude / noise_rms)
-    return snr_peak_db
+    # NESZ в линейных единицах
+    nesz_linear = noise_power * d_az * d_r / K
+    # Преобразование в дБ
+    nesz_db = 10 * np.log10(nesz_linear)
+
+    return nesz_db, nesz_linear
 
 
-# === ИЗМЕНЕНИЯ В ОСНОВНОЙ ФУНКЦИИ main() ===
+def calculate_sigma0_calibrated(pixel_power, noise_power, K, d_az, d_r):
+    """
+    Расчет калиброванной УЭПР для пикселя
+    """
+    # Вычитание шума и калибровка
+    sigma0_linear = (pixel_power - noise_power) * d_az * d_r / K
+    sigma0_db = 10 * np.log10(sigma0_linear) if sigma0_linear > 0 else -80
+
+    return sigma0_db, sigma0_linear
+
+
+def calculate_rcs_calibrated(target_window_complex, noise_power, K):
+    """
+    Расчет калиброванной ЭПР для точечной цели
+    """
+    # Суммарная энергия цели в окне
+    target_energy = np.sum(np.abs(target_window_complex) ** 2)
+
+    # Вычитание энергии шума (шумовая мощность * количество пикселей)
+    noise_energy = noise_power * target_window_complex.size
+    calibrated_energy = target_energy - noise_energy
+
+    # Расчет ЭПР
+    rcs_linear = calibrated_energy / K
+    rcs_db = 10 * np.log10(rcs_linear) if rcs_linear > 0 else -80
+
+    return rcs_db, rcs_linear
+
+
+def find_shadow_regions(radar_image_complex, min_region_size=50):
+    """
+    Поиск участков радиолокационной тени для оценки NESZ
+    """
+    radar_image_db = 20 * np.log10(np.abs(radar_image_complex) + 1e-12)
+
+    # Порог для тени (значения ниже этого считаются тенями)
+    shadow_threshold = np.percentile(radar_image_db, 5)
+
+    shadow_regions = []
+    h, w = radar_image_db.shape
+
+    # Поиск связных областей с низкой яркостью
+    shadow_mask = radar_image_db < shadow_threshold
+    labeled_mask, num_features = ndimage.label(shadow_mask)
+
+    for i in range(1, num_features + 1):
+        region_mask = labeled_mask == i
+        region_size = np.sum(region_mask)
+
+        if region_size >= min_region_size:
+            # Координаты региона
+            region_coords = np.where(region_mask)
+            y_min, y_max = np.min(region_coords[0]), np.max(region_coords[0])
+            x_min, x_max = np.min(region_coords[1]), np.max(region_coords[1])
+
+            # Средняя яркость региона
+            region_brightness = np.mean(radar_image_db[region_mask])
+
+            shadow_regions.append({
+                'coords': (y_min, y_max, x_min, x_max),
+                'size': region_size,
+                'mean_brightness_db': region_brightness
+            })
+
+    return shadow_regions
+
+
+СтерЖенёк(Ферритовый), [28.11.2025 2: 53]
 
 def main():
-    # Генерация с шумом
+    # Существующий код загрузки данных
     radar_image_complex, radar_image = load_radar_image_from_hdf5(HDF5_FILE_PATH)
+    detected_peaks = find_targets(radar_image_complex, MIN_DISTANCE, THRESHOLD_OFFSET_DB)
+    T_synth, F_r_discr, Full_velocity, output_samp_rate, output_prf = read_radar_params_from_json(JSON_FILE_PATH)
+    Noise_power = calculate_noise_threshold(radar_image_complex)
 
-    # === ИСПРАВЛЕНИЕ: Используем отладочную версию для проверки фаз ===
-    print("=== ПРОВЕРКА КОМПЛЕКСНОГО ИЗОБРАЖЕНИЯ И ФАЗ ===")
-    noise_window, noise_amplitudes, noise_phases, match_quality = find_rayleigh_uniform_region_debug(
-        radar_image_complex)
+    # === ИЗМЕНЕНИЕ: Расчет шагов дискретизации ===
+    d_r = c / (2 * output_samp_rate)  # Шаг по дальности
+    d_az = Full_velocity / output_prf  # Шаг по азимуту
 
-    # Расчет порога и параметров шума
-    threshold_linear, noise_rms, noise_power = calculate_noise_threshold(radar_image_complex, THRESHOLD_OFFSET_DB)
+    # === ИЗМЕНЕНИЕ: Параметры калибровки ===
+    # Для уголкового отражателя с ребром 0.5 м на частоте 9.6 ГГц
+    sigma_ref = 268.5  # м² (расчетная ЭПР)
 
-    detected_peaks = find_targets(radar_image, MIN_DISTANCE, THRESHOLD_OFFSET_DB)
-    T_synth, F_r_discr, Full_velocity = read_radar_params_from_json(JSON_FILE_PATH)
+    # Координаты калибровочных целей (нужно задать или определить автоматически)
+    # ВАЖНО: Замените на реальные координаты ваших калибровочных целей
+    calibration_targets_coords = [
+        (350, 1000),  # Пример координат калибровочной цели
+        # Добавьте другие калибровочные цели при наличии
+    ]
+
+    # === ИЗМЕНЕНИЕ: Расчет калибровочного коэффициента ===
+    K, E_mean_db = calculate_calibration_coefficient(
+        radar_image_complex, calibration_targets_coords, sigma_ref, d_az, d_r
+    )
+
+    # === ИЗМЕНЕНИЕ: Расчет радиометрической чувствительности ===
+    nesz_db, nesz_linear = calculate_nesz(Noise_power, K, d_az, d_r)
+
+    # === ИЗМЕНЕНИЕ: Поиск теневых регионов для оценки NESZ ===
+    shadow_regions = find_shadow_regions(radar_image_complex)
 
     targets_data = []
 
     for i, target_yx in enumerate(detected_peaks):
-        # === ИЗМЕНЕНИЕ: Выделяем КОМПЛЕКСНОЕ окно для расчета SNR и фаз ===
-        window_complex = extract_target_window(radar_image_complex, target_yx, WINDOW_SIZE)
-        window_amplitude = np.abs(window_complex)  # Амплитудное окно для визуализации
+        # Выделение окна
+        window = extract_target_window(radar_image_complex, target_yx, WINDOW_SIZE)
+        snr_db = calculate_snr_for_target(window, Noise_power)
 
-        # === ДОБАВЛЕНИЕ: Расчет SNR для цели ===
-        snr_db = calculate_snr_for_target(window_complex, noise_amplitudes)
-        snr_peak_db = calculate_snr_peak(window_complex, noise_rms)
+        # === ИЗМЕНЕНИЕ: Расчет калиброванной ЭПР ===
+        rcs_db, rcs_linear = calculate_rcs_calibrated(window, Noise_power, K)
 
-        print(f"Цель {i + 1}: SNR = {snr_db:.2f} дБ, Пиковый SNR = {snr_peak_db:.2f} дБ")
+        # === ИЗМЕНЕНИЕ: Расчет калиброванной УЭПР для центрального пикселя ===
+        center_y, center_x = window.shape[0] // 2, window.shape[1] // 2
+        center_power = np.abs(window[center_y, center_x]) ** 2
+        sigma0_db, sigma0_linear = calculate_sigma0_calibrated(
+            center_power, Noise_power, K, d_az, d_r
+        )
 
-        # Извлечение сечений из амплитудного окна
-        horizontal_section, vertical_section = extract_sections(window_amplitude)
+        # Извлечение сечений (существующий код)
+        horizontal_section, vertical_section = extract_sections(window)
 
-        # Анализ горизонтального сечения
+        # Анализ сечений (существующий код)
         t_h, h_signal_db, h_signal_linear = generate_sinc_signal_from_section(horizontal_section, WINDOW_SIZE[0])
         h_results = analiz_sechenia(t_h, h_signal_db, WINDOW_SIZE[0] / 2)
 
-        # Анализ вертикального сечения
         t_v, v_signal_db, v_signal_linear = generate_sinc_signal_from_section(vertical_section, WINDOW_SIZE[1])
         v_results = analiz_sechenia(t_v, v_signal_db, WINDOW_SIZE[1] / 2)
 
         # Формируем данные для отчета
         target_data = {
-            'window_linear': window_amplitude,  # Используем амплитудное окно для визуализации
-            'window_complex': window_complex,  # Сохраняем комплексное для анализа
-            'snr_db': snr_db,  # === ДОБАВЛЕНО: SNR ===
-            'snr_peak_db': snr_peak_db,  # === ДОБАВЛЕНО: Пиковый SNR ===
+            'window_linear': window,
+            'snr_db': snr_db,
+            # === ИЗМЕНЕНИЕ: Добавляем калиброванные параметры ===
+            'rcs_db': rcs_db,
+            'rcs_linear': rcs_linear,
+            'sigma0_db': sigma0_db,
+            'sigma0_linear': sigma0_linear,
+            # Существующие данные...
             'h_t': t_h,
             'h_signal_db': h_signal_db,
             'h_wl': h_results.get('wl'),
@@ -120,196 +183,47 @@ def main():
             'h_width': h_results.get('measured_width', 0),
             'h_pslr': h_results.get('classical_pslr', -80),
             'h_i_pslr': h_results.get('integral_pslr', -80),
-        'h_sinc_interp': h_results.get('sinc_interp'),
-        'h_t_interp': h_results.get('t_interp'),
-        'v_t': t_v,
-        'v_signal_db': v_signal_db,
-        'v_wl': v_results.get('wl'),
-        'v_wr': v_results.get('wr'),
-        'v_width': v_results.get('measured_width', 0),
+            'h_sinc_interp': h_results.get('sinc_interp'),
+            'h_t_interp': h_results.get('t_interp'),
+            'v_t': t_v,
+            'v_signal_db': v_signal_db,
+            'v_wl': v_results.get('wl'),
+            'v_wr': v_results.get('wr'),
+            'v_width': v_results.get('measured_width', 0),
+
+            СтерЖенёк(Ферритовый), [28.11.2025 2:53]
         'v_pslr': v_results.get('classical_pslr', -80),
         'v_i_pslr': v_results.get('integral_pslr', -80),
         'v_sinc_interp': v_results.get('sinc_interp'),
         'v_t_interp': v_results.get('t_interp'),
         }
+
         targets_data.append(target_data)
 
-    # ... остальная часть функции main без изменений до генерации отчета ...
+    # === ИЗМЕНЕНИЕ: Формирование отчета с радиометрическими параметрами ===
+    with open(os.path.join(result_folder, "radar_params.txt"), 'w', encoding='utf-8') as f:
+        f.write(f"Название голограммы: {HOLOGRAM_NAME}\n")
+        f.write(f"Размер голограммы: {radar_image.shape[1]} × {radar_image.shape[0]} пикселей\n")
+        f.write(f"Количество целей: {len(detected_peaks)}\n")
+        f.write(f"Максимальная амплитуда РЛИ: {np.max(radar_image):.6f}\n")
+        f.write(f"Минимальная амплитуда РЛИ: {np.min(radar_image):.6f}\n")
+        f.write(f"Средняя амплитуда РЛИ: {np.mean(radar_image):.6f}\n")
 
-    # === ИЗМЕНЕНИЕ В ОТЧЕТЕ: Добавляем SNR ===
-    for i, target_data in enumerate(targets_data):
-        target_id = i + 1
-        target_coords = detected_peaks[i]
+        # Радиометрические параметры
+        f.write("\n=== РАДИОМЕТРИЧЕСКИЕ ПАРАМЕТРЫ ===\n")
+        f.write(f"Шаг по азимуту (d_az): {d_az:.6f} м\n")
+        f.write(f"Шаг по дальности (d_r): {d_r:.6f} м\n")
+        f.write(f"Расчетная ЭПР эталона (σ_ref): {sigma_ref:.2f} м²\n")
+        f.write(f"Средняя энергия эталонов (E_mean): {E_mean_db:.2f} дБ\n")
+        f.write(f"Калибровочный коэффициент (K): {K:.6f}\n")
+        f.write(f"Радиометрическая чувствительность (NESZ): {nesz_db:.2f} дБ\n")
+        f.write(f"Мощность шума: {Noise_power:.6f}\n")
 
-        # Создаем папку для цели
-        target_folder = os.path.join(result_folder, f"target_{target_id}")
-        os.makedirs(target_folder, exist_ok=True)
+        # Информация о теневых регионах
+        f.write(f"\n=== ТЕНЕВЫЕ РЕГИОНЫ ДЛЯ ОЦЕНКИ NESZ ===\n")
+        f.write(f"Количество теневых регионов: {len(shadow_regions)}\n")
+        for i, region in enumerate(shadow_regions[:5]):  # Показываем первые 5
+            f.write(f"Регион {i + 1}: размер={region['size']} пикс., УЭПР={region['mean_brightness_db']:.2f} дБ\n")
 
-        # Рассчитываем ширину в метрах
-        h_width_meters = convert_to_meters(T_synth, F_r_discr, Full_velocity, radar_image, target_data['h_width'],
-                                           'horizontal')
-        v_width_meters = convert_to_meters(T_synth, F_r_discr, Full_velocity, radar_image, target_data['v_width'],
-                                           'vertical')
-
-        # Сохраняем параметры цели С ДОБАВЛЕННЫМ SNR
-        with open(os.path.join(target_folder, f"target_{target_id}_params.txt"), 'w', encoding='utf-8') as f:
-            f.write(f"Цель №{target_id}\n")
-            f.write(f"Положение: азимут {target_coords[0]}, дальность {target_coords[1]}\n\n")
-
-            f.write("=== ПАРАМЕТРЫ КАЧЕСТВА ===\n")
-            f.write(f"SNR: {target_data['snr_db']:.2f} дБ\n")
-            f.write(f"Пиковый SNR: {target_data['snr_peak_db']:.2f} дБ\n\n")
-
-            f.write("Сечение по дальности:\n")
-            f.write(f"Ширина главного лепестка: {target_data['h_width']:.4f} отсч. ({h_width_meters:.4f} м)\n")
-            f.write(f"Максимальный УБЛ: {target_data['h_pslr']:.2f} дБ\n")
-            f.write(f"Интегральный УБЛ: {target_data['h_i_pslr']:.2f} дБ\n\n")
-
-            f.write("Сечение по азимуту:\n")
-            f.write(f"Ширина главного лепестка: {target_data['v_width']:.4f} отсч. ({v_width_meters:.4f} м)\n")
-            f.write(f"Максимальный УБЛ: {target_data['v_pslr']:.2f} дБ\n")
-            f.write(f"Интегральный УБЛ: {target_data['v_i_pslr']:.2f} дБ\n")
-
-        # ... остальная часть сохранения данных без изменений ...
-
-    # === ИЗМЕНЕНИЕ В TYPST ОТЧЕТЕ: Добавляем SNR ===
-    typ_content = f"""
-#set_page(width: auto, height: auto, margin: 1.5cm)
-#set text(font: "New Computer Modern", size: 12pt, lang: "ru")
-#show heading: set text(weight: "bold")
-
-#align(center)[
-#text(size: 24pt, weight: "bold")[Анализ радиолокационного изображения]
-]
-
-#align(center)[
-#text(size: 12pt)[Голограмма: {HOLOGRAM_NAME}]
-]
-
-#align(center)[
-#text(size: 12pt)[Размер голограммы: {radar_image.shape[1]} × {radar_image.shape[0]} пикселей, количество целей: {len(detected_peaks)}]
-]
-
-#align(center)[
-#text(size: 12pt)[Уровень шума: {20 * np.log10(noise_rms):.2f} дБ, RMS шума: {noise_rms:.6f}]
-]
-
-#align(center)[
-#figure(
-    image("radar_image.png"),
-    caption: [Радиолокационное изображение с обнаруженными целями]
-)
-]
-"""
-
-    # Добавляем данные по каждой цели с SNR
-    for i, target_data in enumerate(targets_data):
-        target_id = i + 1
-        target_coords = detected_peaks[i]
-        target_folder = f"target_{target_id}"
-
-        # Рассчитываем ширину в метрах для таблицы
-        h_width_meters = convert_to_meters(T_synth, F_r_discr, Full_velocity, radar_image, target_data['h_width'],
-                                           'horizontal')
-        v_width_meters = convert_to_meters(T_synth, F_r_discr, Full_velocity, radar_image, target_data['v_width'],
-                                           'vertical')
-
-        typ_content += f"""
-#align(center)[
-#text(size: 18pt, weight: "bold")[Цель №{target_id}]
-]
-
-#align(center)[
-#text(size: 12pt)[Положение: азимут {target_coords[0]}, дальность {target_coords[1]}]
-]
-
-СтерЖенёк (Ферритовый), [21.11.2025 0:44]
-// Параметры качества цели
-#align(center)[
-#table(
-    columns: 2,
-    align: center,
-    stroke: (x: 0.5pt, y: 0.5pt),
-    inset: 5pt,
-    [*Параметр*], [*Значение*],
-    [SNR], [{target_data['snr_db']:.2f} дБ],
-    [Пиковый SNR], [{target_data['snr_peak_db']:.2f} дБ],
-)
-]
-
-// Визуализация окна цели
-#align(center)[
-#table(
-    columns: (14cm, 14cm), 
-    align: center, 
-    stroke: (x: 0.2pt, y: 0.2pt), 
-    inset: 5pt,
-    [
-        #figure(
-            image("target_{target_id}/target_{target_id}_linear.png", width: 100%),
-            caption: [Окно цели - линейный масштаб]
-        )
-    ],
-    [
-        #figure(
-            image("target_{target_id}/target_{target_id}_db.png", width: 95%),
-            caption: [Окно цели - логарифмический масштаб]
-        )
-    ]
-)]
-
-// Сечения цели
-#align(center)[
-#table(
-    columns: (14cm, 14cm), 
-    align: center, 
-    stroke: (x: 0.2pt, y: 0.2pt),
-    inset: 5pt,
-    [
-        #figure(
-            image("target_{target_id}/target_{target_id}_horizontal.png", width: 100%),
-            caption: [Сечение по дальности]
-        )
-    ],
-    [
-        #figure(
-            image("target_{target_id}/target_{target_id}_vertical.png", width: 91%),
-            caption: [Сечение по азимуту]
-        )
-    ]
-)]
-
-#align(center)[
-#table(
-    columns: 2,
-    align: center,
-    stroke: (x: 0.5pt, y: 0.5pt),
-    inset: 5pt,
-    [
-        #table(
-            columns: 2,
-            align: center,
-            stroke: (x: 0.5pt, y: 0.5pt),
-            inset: 5pt,
-            [*Параметр сечения по дальности*], [*Значение*],
-            [Ширина главного лепестка], [{target_data['h_width']:.4f} отсч. ({h_width_meters:.4f} м)],
-            [Максимальный УБЛ], [{target_data['h_pslr']:.2f} дБ],
-            [Интегральный УБЛ], [{target_data['h_i_pslr']:.2f} дБ],
-        )
-    ],
-    [
-        #table(
-            columns: 2,
-            align: center,
-            stroke: (x: 0.5pt, y: 0.5pt),
-            inset: 5pt,
-            [*Параметр сечения по азимуту*], [*Значение*],
-            [Ширина главного лепестка], [{target_data['v_width']:.4f} отсч. ({v_width_meters:.4f} м)],
-            [Максимальный УБЛ], [{target_data['v_pslr']:.2f} дБ],
-            [Интегральный УБЛ], [{target_data['v_i_pslr']:.2f} дБ],
-        )
-    ]
-)]
-"""
-
-    # ... остальная часть генерации отчета без изменений ...
+    # Существующий код визуализации и генерации отчета...
+    # [остальная часть кода без изменений]
