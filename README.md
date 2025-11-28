@@ -1,4 +1,42 @@
-def calculate_target_rcs_calibrated(target_window_complex, noise_power, 
+# В секции генерации typst-отчета добавьте:
+
+# === ИЗМЕНЕНИЕ: Добавляем радиометрические параметры в отчет ===
+typ_content += f"""
+#align(center)[
+#text(size: 16pt, weight: "bold")[Радиометрические параметры]
+]
+
+#align(center)[
+#table(
+  columns: 2,
+  align: center,
+  stroke: (x: 0.5pt, y: 0.5pt),
+  inset: 5pt,
+  [*Параметр*], [*Значение*],
+  [Шаг по азимуту (d_az)], ["{d_az:.4f} м"],
+  [Шаг по дальности (d_r)], ["{d_r:.4f} м"],
+  [ЭПР эталона (σ_ref)], ["{sigma_ref:.1f} м²"],
+  [Калибровочный коэффициент (K)], ["{K:.1f}"],
+  [Радиометрическая чувствительность (NESZ)], ["{nesz_db:.2f} дБ"],
+)
+]
+"""
+
+# Для каждой цели в отчете добавьте ЭПР:
+typ_content += f"""
+#table(
+  columns: 2,
+  align: center,
+  stroke: (x: 0.5pt, y: 0.5pt),
+  inset: 5pt,
+  [*Параметр*], [*Значение*],
+  [ЭПР (σ)], ["{target_data['rcs_linear']:.2f} м² ({target_data['rcs_db']:.2f} дБ)"],
+  [УЭПР (σ°)], ["{target_data['sigma0_linear']:.4f} ({target_data['sigma0_db']:.2f} дБ)"],
+  [Ширина главного лепестка], ["{target_data['h_width']:.4f} отсч. ({h_width_meters:.4f} м)"],
+  [Максимальный УБЛ], ["{target_data['h_pslr']:.2f} дБ"],
+  [Интегральный УБЛ], ["{target_data['h_i_pslr']:.2f} дБ"],
+)
+"""def calculate_target_rcs_calibrated(target_window_complex, noise_power, 
                                   sigma_ref=268.5, calibration_factor=1.0):
     """
     Расчет калиброванной ЭПР цели
