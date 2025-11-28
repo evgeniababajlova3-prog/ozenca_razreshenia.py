@@ -1,4 +1,215 @@
-# В секции генерации typst-отчета добавьте:
+############
+# РАДИОМЕТРИЧЕСКИЙ АНАЛИЗ - ДОБАВЛЕННЫЙ ФУНКЦИОНАЛ
+############
+
+def calculate_nesz(noise_power, calibration_constant, range_res, azimuth_res):
+    """
+    Расчет радиометрической чувствительности (NESZ)
+    """
+    nesz_linear = noise_power / calibration_constant
+    nesz_db = 10 * np.log10(nesz_linear)
+    return nesz_db
+
+def calculate_calibration_constant(target_window_complex, theoretical_rcs, noise_power):
+    """
+    Расчет калибровочного коэффициента по интегральному методу
+    """
+    # Выделяем область главного лепестка (по порогу -3 дБ от максимума)
+    window_real = np.abs(target_window_complex)
+    max_amplitude = np.max(window_real)
+    threshold = max_amplitude * 10 ** (-3 / 20)
+    mask = window_real >= threshold
+    
+    # Суммируем энергию в главном лепестке
+    target_energy = np.sum(window_real[mask] ** 2)
+    
+    # Вычитаем шумовую составляющую
+    noise_energy = noise_power * np.sum(mask)
+    signal_energy = target_energy - noise_energy
+    
+    # Калибровочный коэффициент
+    calibration_constant = signal_energy / theoretical_rcs
+    
+    return calibration_constant, signal_energy
+
+def calculate_target_rcs(target_window_complex, calibration_constant, noise_power):
+    """
+    Расчет ЭПР цели по интегральному методу
+    """
+    # Выделяем область главного лепестка (по порогу -3 дБ от максимума)
+    window_real = np.abs(target_window_complex)
+    max_amplitude = np.max(window_real)
+    threshold = max_amplitude * 10 ** (-3 / 20)
+    mask = window_real >= threshold
+    
+    # Суммируем энергию в главном лепестке
+    target_energy = np.sum(window_real[mask] ** 2)
+    
+    # Вычитаем шумовую составляющую
+    noise_energy = noise_power * np.sum(mask)
+    signal_energy = target_energy - noise_energy
+    
+    # Расчет ЭПР
+    rcs_linear = signal_energy / calibration_constant
+    rcs_db = 10 * np.log10(rcs_linear) if rcs_linear > 0 else -80
+    
+    return rcs_db, signal_energy
+
+# ОБНОВЛЕННАЯ ФУНКЦИЯ convert_to_sigma0
+def convert_to_sigma0(amplitude, t_synth, f_r_discr, full_velocity, matrix, window_complex, noise_power, calibration_constant):
+    """Преобразование амплитуды в удельную ЭПР (σ°) с использованием калибровочного коэффициента"""
+    
+    # Расчет ЭПР цели
+    rcs_db, signal_energy = calculate_target_rcs(window_complex, calibration_constant, noise_power)
+    
+    # Получаем разрешения
+    range_resolution, azimuth_resolution = resolution(t_synth, f_r_discr, full_velocity, matrix)
+    
+    # Расчет удельной ЭПР (для распределенных целей)
+    sigma0_linear = (signal_energy * range_resolution * azimuth_resolution) / calibration_constant
+    sigma0_db = 10 * np.log10(sigma0_linear) if sigma0_linear > 0 else -80
+    
+    return sigma0_db, rcs_db
+
+############
+# ОБНОВЛЕННАЯ ОСНОВНАЯ ФУНКЦИЯ
+############
+
+def main():
+    # Загрузка данных
+    radar_image_complex, radar_image = load_radar_image_from_hdf5(HDF5_FILE_PATH)
+    detected_peaks = find_targets(radar_image_complex, MIN_DISTANCE, THRESHOLD_OFFSET_DB)
+    T_synth, F_r_discr, Full_velocity = read_radar_params_from_json(JSON_FILE_PATH)
+    Noise_power = calculate_noise_threshold(radar_image_complex)
+    
+    # ДОБАВЛЕНО: Параметры для калибровки
+    THEORETICAL_RCS = 268.5  # ЭПР эталонного отражателя, м² (из отчета коллеги)
+    range_res, azimuth_res = resolution(T_synth, F_r_discr, Full_velocity, radar_image_complex)
+    
+    targets_data = []
+    
+    # ДОБАВЛЕНО: Калибровка по первой цели (предполагая, что это эталонный отражатель)
+    if len(detected_peaks) > 0:
+        first_target_yx = detected_peaks[0]
+        first_target_window = extract_target_window(radar_image_complex, first_target_yx, WINDOW_SIZE)
+        calibration_constant, first_target_energy = calculate_calibration_constant(
+            first_target_window, THEORETICAL_RCS, Noise_power
+        )
+        
+        # ДОБАВЛЕНО: Расчет радиометрической чувствительности
+        nesz_db = calculate_nesz(Noise_power, calibration_constant, range_res, azimuth_res)
+        
+        print(f"Калибровочный коэффициент: {calibration_constant:.2f}")
+        print(f"Радиометрическая чувствительность (NESZ): {nesz_db:.2f} дБ")
+    else:
+        calibration_constant = 1
+        nesz_db = -80
+        print("Цели не обнаружены, калибровка невозможна")
+
+    for i, target_yx in enumerate(detected_peaks):
+        # Выделение окна
+        window = extract_target_window(radar_image_complex, target_yx, WINDOW_SIZE)
+        snr_db = calculate_snr_for_target(window, Noise_power)
+        
+        # ДОБАВЛЕНО: Расчет ЭПР и удельной ЭПР
+        sigma0_db, rcs_db = convert_to_sigma0(
+            radar_image, T_synth, F_r_discr, Full_velocity, 
+            radar_image_complex, window, Noise_power, calibration_constant
+        )
+
+        # Извлечение сечений
+        horizontal_section, vertical_section = extract_sections(window)
+
+        # Анализ горизонтального сечения
+        t_h, h_signal_db, h_signal_linear = generate_sinc_signal_from_section(horizontal_section, WINDOW_SIZE[0])
+        h_results = analiz_sechenia(t_h, h_signal_db, WINDOW_SIZE[0] / 2)
+
+        # Анализ вертикального сечения
+        t_v, v_signal_db, v_signal_linear = generate_sinc_signal_from_section(vertical_section, WINDOW_SIZE[1])
+        v_results = analiz_sechenia(t_v, v_signal_db, WINDOW_SIZE[1] / 2)
+
+        # Формируем данные для отчета
+        target_data = {
+            'window_linear': window,
+            'snr_db': snr_db,
+            'rcs_db': rcs_db,  # ДОБАВЛЕНО: ЭПР цели
+            'sigma0_db': sigma0_db,  # ДОБАВЛЕНО: Удельная ЭПР
+            'h_t': t_h,
+            'h_signal_db': h_signal_db,
+            'h_wl': h_results.get('wl'),
+            'h_wr': h_results.get('wr'),
+            'h_width': h_results.get('measured_width', 0),
+            'h_pslr': h_results.get('classical_pslr', -80),
+            'h_i_pslr': h_results.get('integral_pslr', -80),
+            'h_sinc_interp': h_results.get('sinc_interp'),
+            'h_t_interp': h_results.get('t_interp'),
+            'v_t': t_v,
+            'v_signal_db': v_signal_db,
+            'v_wl': v_results.get('wl'),
+            'v_wr': v_results.get('wr'),
+            'v_width': v_results.get('measured_width', 0),
+            'v_pslr': v_results.get('classical_pslr', -80),
+            'v_i_pslr': v_results.get('integral_pslr', -80),
+            'v_sinc_interp': v_results.get('sinc_interp'),
+            'v_t_interp': v_results.get('t_interp'),
+        }
+
+        targets_data.append(target_data)
+
+    # ДОБАВЛЕНО: Сохранение радиометрических параметров в отчет
+    with open(os.path.join(result_folder, "radar_params.txt"), 'w', encoding='utf-8') as f:
+        f.write(f"Название голограммы: {HOLOGRAM_NAME}\n")
+        f.write(f"Размер голограммы: {radar_image.shape[1]} × {radar_image.shape[0]} пикселей\n")
+        f.write(f"Количество целей: {len(detected_peaks)}\n")
+        f.write(f"Максимальная амплитуда РЛИ: {np.max(radar_image):.6f}\n")
+        f.write(f"Минимальная амплитуда РЛИ: {np.min(radar_image):.6f}\n")
+        f.write(f"Средняя амплитуда РЛИ: {np.mean(radar_image):.6f}\n")
+        f.write(f"Радиометрическая чувствительность (NESZ): {nesz_db:.2f} дБ\n")  # ДОБАВЛЕНО
+        f.write(f"Калибровочный коэффициент: {calibration_constant:.2f}\n")  # ДОБАВЛЕНО
+        f.write(f"ЭПР эталонной цели: {THEORETICAL_RCS} м²\n")  # ДОБАВЛЕНО
+
+    # ... остальная часть функции main без изменений до формирования Typst отчета ...
+
+    # ДОБАВЛЕНО: Вставка радиометрических параметров в Typst отчет
+    typ_content = f"""
+#set_page(width: auto, height: auto, margin: 1.5cm)
+#set text(font: "New Computer Modern", size: 12pt, lang: "ru")
+#show heading: set text(weight: "bold")
+
+#align(center)[
+#text(size: 24pt, weight: "bold")[Анализ радиолокационного изображения]
+]
+
+#align(center)[
+#text(size: 12pt)[Голограмма: {HOLOGRAM_NAME}]
+]
+
+#align(center)[
+#text(size: 12pt)[Размер голограммы: {radar_image.shape[1]} × {radar_image.shape[0]} пикселей, количество целей: {len(detected_peaks)}]
+]
+
+#align(center)[
+#text(size: 12pt)[Радиометрическая чувствительность (NESZ): {nesz_db:.2f} дБ]
+]
+
+#align(center)[
+#figure(
+    image("radar_image.png"),
+    caption: [Радиолокационное изображение с обнаруженными целями]
+)
+"""
+
+    # ДОБАВЛЕНО: Вставка ЭПР для каждой цели в Typst отчет
+    for i, target_data in enumerate(targets_data):
+        target_id = i + 1
+        # ... существующий код для целей ...
+        
+        typ_content += f"""
+#align(center)[
+#text(size: 12pt)[ЭПР цели: {target_data['rcs_db']:.2f} дБ м², Удельная ЭПР: {target_data['sigma0_db']:.2f} дБ]
+]
+"""
+        # ... остальная часть формирования отчета для цели ...# В секции генерации typst-отчета добавьте:
 
 # === ИЗМЕНЕНИЕ: Добавляем радиометрические параметры в отчет ===
 typ_content += f"""
