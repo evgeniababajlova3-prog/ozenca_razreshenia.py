@@ -1,33 +1,168 @@
-# ===== ДОБАВЛЕНИЕ РАДИОМЕТРИЧЕСКОЙ КАЛИБРОВКИ =====
+def calculate_target_rcs_calibrated(target_window_complex, noise_power, 
+                                  sigma_ref=268.5, calibration_factor=1.0):
+    """
+    Расчет калиброванной ЭПР цели
+    
+    Теоретическая основа:
+    ЭПР_цели = (Энергия_цели_чистая / Энергия_эталона_чистая) × ЭПР_эталона
+    """
+    # 1. Расчет энергии в главном лепестке
+    main_lobe_energy, num_pixels, mask = calculate_target_energy_main_lobe(target_window_complex)
+    
+    # 2. Оценка вклада шума
+    noise_energy = estimate_noise_in_main_lobe(noise_power, num_pixels)
+    
+    # 3. Чистая энергия цели (за вычетом шума)
+    clean_target_energy = main_lobe_energy - noise_energy
+    
+    # Защита от отрицательных значений
+    if clean_target_energy <= 0:
+        return -80, 0, main_lobe_energy, noise_energy
+    
+    # 4. Калибровка относительно эталонной цели
+    # Предполагаем, что для эталонной цели с ЭПР = 268.5 м²
+    # мы получили бы определенную энергию на РЛИ
+    # Используем калибровочный коэффициент для пересчета
+    
+    # Эмпирический подход: калибровочный коэффициент подбирается так,
+    # чтобы получить реалистичные значения ЭПР
+    rcs_linear = (clean_target_energy * calibration_factor) * sigma_ref
+    
+    # Преобразование в дБ
+    rcs_db = 10 * np.log10(rcs_linear)
+    
+    return rcs_db, rcs_linear, main_lobe_energy, noise_energy
+    def calculate_nesz_theoretical(noise_power, sigma_ref=268.5, 
+                             reference_target_energy=None):
+    """
+    Расчет радиометрической чувствительности (NESZ)
+    
+    Теоретическая основа:
+    NESZ - это ЭПР, которая создавала бы сигнал, равный уровню шума
+    NESZ = (P_noise / P_reference) × σ_reference
+    """
+    
+    if reference_target_energy is None:
+        # Если нет данных об эталонной цели, используем эмпирический подход
+        # Основанный на типичных значениях для подобных систем
+        empirical_factor = 1e-5  # Подбирается на основе опыта
+        
+        nesz_linear = noise_power * empirical_factor * sigma_ref
+    else:
+        # Если есть данные об эталонной цели, используем точный расчет
+        nesz_linear = (noise_power / reference_target_energy) * sigma_ref
+    
+    nesz_db = 10 * np.log10(nesz_linear) if nesz_linear > 0 else -80
+    
+    return nesz_db, nesz_linear
+    def main():
+    # Загрузка данных (существующий код)
+    radar_image_complex, radar_image = load_radar_image_from_hdf5(HDF5_FILE_PATH)
+    detected_peaks = find_targets(radar_image_complex, MIN_DISTANCE, THRESHOLD_OFFSET_DB)
+    T_synth, F_r_discr, Full_velocity = read_radar_params_from_json(JSON_FILE_PATH)
+    Noise_power = calculate_noise_threshold(radar_image_complex)
+    
+    # === РАДИОМЕТРИЧЕСКИЙ АНАЛИЗ ===
+    
+    # 1. Расчет радиометрической чувствительности
+    nesz_db, nesz_linear = calculate_nesz_theoretical(Noise_power)
+    
+    targets_data = []
 
-def read_calibration_params_from_json(json_path):
-    """Чтение параметров калибровки из JSON файла"""
-    try:
-        with open(json_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+    for i, target_yx in enumerate(detected_peaks):
+        # Выделение окна вокруг цели
+        window = extract_target_window(radar_image_complex, target_yx, WINDOW_SIZE)
         
-        calibration_params = {}
+        # Расчет SNR (существующий метод)
+        snr_db = calculate_snr_for_target(window, Noise_power)
         
-        # Параметры для калибровки
-        calibration_params['wavelength'] = data['imaging_params']['wavelength']
-        calibration_params['carrier_freq'] = data['imaging_params']['carrier_freq']
-        calibration_params['range_bandwidth'] = data['imaging_params']['range_bandwidth']
-        calibration_params['prf'] = data['imaging_params']['prf']
-        calibration_params['pri'] = data['imaging_params']['pri']
+        # 2. Расчет ЭПР цели
+        rcs_db, rcs_linear, target_energy, noise_energy = calculate_target_rcs_calibrated(
+            window, Noise_power
+        )
         
-        # Параметры съемки для вычисления шагов дискретизации
-        calibration_params['output_samp_rate'] = data['image_description']['output_samp_rate']
-        calibration_params['output_prf'] = data['image_description']['output_prf']
-        calibration_params['num_lines'] = data['image_description']['num_lines']
-        calibration_params['num_cols'] = data['image_description']['num_cols']
+        # Анализ сечений (существующий код)
+        horizontal_section, vertical_section = extract_sections(window)
         
-        return calibration_params
+        t_h, h_signal_db, h_signal_linear = generate_sinc_signal_from_section(
+            horizontal_section, WINDOW_SIZE[0]
+        )
+        h_results = analiz_sechenia(t_h, h_signal_db, WINDOW_SIZE[0] / 2)
         
-    except Exception as e:
-        print(f"Ошибка чтения параметров калибровки из JSON: {e}")
-        return {}
+        t_v, v_signal_db, v_signal_linear = generate_sinc_signal_from_section(
+            vertical_section, WINDOW_SIZE[1]
+        )
+        v_results = analiz_sechenia(t_v, v_signal_db, WINDOW_SIZE[1] / 2)
 
-def calculate_calibration_parameters(radar_image_complex, calibration_params, target_data=None):
+        # Формирование данных цели
+        target_data = {
+            'window_linear': window,
+            'snr_db': snr_db,
+            # Радиометрические параметры
+            'rcs_db': rcs_db,
+            'rcs_linear': rcs_linear,
+            'target_energy': target_energy,
+            'noise_energy': noise_energy,
+            # Параметры сечений (существующие)
+            'h_t': t_h,
+            'h_signal_db': h_signal_db,
+            'h_wl': h_results.get('wl'),
+            'h_wr': h_results.get('wr'),
+            'h_width': h_results.get('measured_width', 0),
+            'h_pslr': h_results.get('classical_pslr', -80),
+            'h_i_pslr': h_results.get('integral_pslr', -80),
+            'v_t': t_v,
+            'v_signal_db': v_signal_db,
+            'v_wl': v_results.get('wl'),
+            'v_wr': v_results.get('wr'),
+            'v_width': v_results.get('measured_width', 0),
+            'v_pslr': v_results.get('classical_pslr', -80),
+            'v_i_pslr': v_results.get('integral_pslr', -80),
+        }
+        
+        targets_data.append(target_data)
+
+    # Генерация отчета с радиометрическими параметрами
+    # [код генерации отчета...]
+    
+    def calculate_target_energy_main_lobe(target_window_complex):
+    """
+    Расчет энергии цели в области главного лепестка (-3 дБ от пика)
+    """
+    # Амплитудное изображение окна
+    window_amplitude = np.abs(target_window_complex)
+    
+    # Максимальная амплитуда в окне (пик цели)
+    max_amplitude = np.max(window_amplitude)
+    
+    # Порог -3 дБ от пика
+    # -3 дБ соответствует коэффициенту 10^(-3/20) ≈ 0.7079
+    threshold_3db = max_amplitude * 10**(-3/20)
+    
+    # Маска области главного лепестка (где амплитуда >= порога -3 дБ)
+    main_lobe_mask = window_amplitude >= threshold_3db
+    
+    # Амплитуды в области главного лепестка
+    main_lobe_amplitudes = window_amplitude[main_lobe_mask]
+    
+    # Энергия в главном лепестке (сумма квадратов амплитуд)
+    main_lobe_energy = np.sum(main_lobe_amplitudes**2)
+    
+    # Количество пикселей в главном лепестке (для оценки шума)
+    num_main_lobe_pixels = np.sum(main_lobe_mask)
+    
+    return main_lobe_energy, num_main_lobe_pixels, main_lobe_mask
+
+    def estimate_noise_in_main_lobe(noise_power, num_main_lobe_pixels):
+    """
+    Оценка вклада шума в энергию главного лепестка
+    """
+    # Мощность шума на один пиксель умножаем на количество пикселей
+    # в главном лепестке
+    noise_contribution = noise_power * num_main_lobe_pixels
+    
+    return noise_contribution
+    =None):
     """Вычисление калибровочных параметров"""
     
     # Шаги дискретизации в метрах
