@@ -1,3 +1,349 @@
+СтерЖенёк(Ферритовый), [05.12.2025 1: 19]
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy import ndimage, stats
+import json
+
+
+def select_polygons_interactive(amplitude_image, max_polygons=10):
+    """
+    Полуавтоматическое выделение полигонов через интерактивный интерфейс.
+    Возвращает список полигонов в виде бинарных масок.
+    """
+    print("Выделите полигоны кликами. Нажмите 'enter' для завершения выделения.")
+
+    polygons_masks = []
+    fig, ax = plt.subplots(figsize=(12, 8))
+    ax.imshow(amplitude_image, cmap='gray', aspect='auto')
+    ax.set_title(f'Выделите до {max_polygons} полигонов. Клик ЛКМ - точки, ПКМ - завершить полигон')
+
+    for poly_idx in range(max_polygons):
+        print(f"\nПолигон {poly_idx + 1}/{max_polygons}")
+        print("Кликайте ЛКМ для добавления точек полигона")
+        print("Клик ПКМ или нажмите 'enter' для завершения текущего полигона")
+        print("Нажмите 'q' для завершения всех выделений")
+
+        points = []
+
+        def onclick(event):
+            if event.button == 1:  # ЛКМ
+                points.append((int(event.ydata), int(event.xdata)))
+                ax.plot(event.xdata, event.ydata, 'ro', markersize=4)
+                if len(points) > 1:
+                    # Соединяем точки линией
+                    last_y, last_x = points[-2]
+                    ax.plot([last_x, event.xdata], [last_y, event.ydata], 'r-', linewidth=1)
+                fig.canvas.draw()
+                print(f"Точка добавлена: ({int(event.ydata)}, {int(event.xdata)})")
+            elif event.button == 3:  # ПКМ
+                if len(points) >= 3:
+                    plt.disconnect(cid)
+                    print(f"Полигон {poly_idx + 1} завершен с {len(points)} точками")
+                else:
+                    print("Нужно минимум 3 точки для полигона")
+
+        cid = fig.canvas.mpl_connect('button_press_event', onclick)
+        plt.waitforbuttonpress()  # Ждем нажатия enter или q
+        plt.disconnect(cid)
+
+        if not points:
+            print("Выделение завершено")
+            break
+
+        # Создаем маску для полигона
+        from skimage.draw import polygon
+        poly_mask = np.zeros_like(amplitude_image, dtype=bool)
+        rows, cols = polygon([p[0] for p in points], [p[1] for p in points],
+                             shape=amplitude_image.shape)
+        poly_mask[rows, cols] = True
+
+        # Проверяем, что полигон не слишком маленький
+        if np.sum(poly_mask) < 100:  # Минимум 100 пикселей
+            print("Полигон слишком маленький, пропускаем...")
+            continue
+
+        polygons_masks.append(poly_mask)
+
+        # Отображаем заполненный полигон
+        ax.imshow(poly_mask, alpha=0.3, cmap='Reds')
+        fig.canvas.draw()
+
+    plt.close(fig)
+    return polygons_masks
+
+
+def compute_polygon_metrics(amplitude_image, complex_image, polygon_mask):
+    """
+    Вычисление всех возможных метрик для одного полигона.
+    """
+    # Извлекаем данные только внутри полигона
+    mask_indices = np.where(polygon_mask)
+    amp_values = amplitude_image[mask_indices]
+    complex_values = complex_image[mask_indices]
+
+    if len(amp_values) == 0:
+        return None
+
+    # 1. Базовые статистики амплитуды
+    amp_mean = np.mean(amp_values)
+    amp_std = np.std(amp_values)
+    amp_var = np.var(amp_values)
+    amp_skew = stats.skew(amp_values.flatten())
+    amp_kurtosis = stats.kurtosis(amp_values.flatten())
+
+    # 2. Комплексные статистики
+    real_values = np.real(complex_values)
+    imag_values = np.imag(complex_values)
+
+    # Проверка круговой симметрии (для АБГШ)
+    # Cov(I,Q) ≈ 0 и Var(I) ≈ Var(Q)
+    cov_iq = np.cov(real_values, imag_values)[0, 1]
+    var_i = np.var(real_values)
+    var_q = np.var(imag_values)
+    circularity_ratio = min(var_i, var_q) / max(var_i, var_q) if max(var_i, var_q) > 0 else 0
+
+
+СтерЖенёк(Ферритовый), [05.12.2025 1: 19]
+# 3. Распределение амплитуды (тест на Релея)
+# Параметр масштаба Релея
+sigma_rayleigh = np.sqrt(np.sum(amp_values ** 2) / (2 * len(amp_values)))
+
+# K-S тест против распределения Релея
+ks_stat, ks_pvalue = stats.kstest(
+    amp_values / amp_mean if amp_mean > 0 else amp_values,  # Нормализованные значения
+    'rayleigh',
+    args=(sigma_rayleigh,)
+)
+
+# 4. Распределение фазы (тест на равномерность)
+phases = np.angle(complex_values)
+phases_norm = (phases + np.pi) % (2 * np.pi)  # Нормализуем к [0, 2π]
+
+# Тест Рэлея на равномерность фазы
+# Для равномерного распределения R ≈ 0
+R = np.abs(np.mean(np.exp(1j * phases_norm)))
+
+# 5. Пространственные метрики (текстура)
+# Вырезаем ограничивающий прямоугольник полигона для анализа текстуры
+rows, cols = np.where(polygon_mask)
+if len(rows) > 0 and len(cols) > 0:
+    rmin, rmax = rows.min(), rows.max()
+    cmin, cmax = cols.min(), cols.max()
+
+    # Берем область с небольшим запасом
+    r_start = max(0, rmin - 5)
+    r_end = min(amplitude_image.shape[0], rmax + 5)
+    c_start = max(0, cmin - 5)
+    c_end = min(amplitude_image.shape[1], cmax + 5)
+
+    region = amplitude_image[r_start:r_end, c_start:c_end]
+    mask_region = polygon_mask[r_start:r_end, c_start:c_end]
+
+    if region.size > 100:  # Достаточный размер для анализа текстуры
+        # Нормализуем область
+        if np.max(region) > np.min(region):
+            region_norm = (region - np.min(region)) / (np.max(region) - np.min(region))
+        else:
+            region_norm = region
+
+        # Простые метрики текстуры
+        # Градиенты (резкость)
+        grad_y, grad_x = np.gradient(region_norm)
+        gradient_magnitude = np.sqrt(grad_x2 + grad_y2)
+        texture_sharpness = np.mean(gradient_magnitude[mask_region[r_start:r_end, c_start:c_end]])
+
+        # Локальная дисперсия (неоднородность)
+        local_var = ndimage.generic_filter(region_norm, np.var, size=3)
+        texture_heterogeneity = np.mean(local_var[mask_region[r_start:r_end, c_start:c_end]])
+    else:
+        texture_sharpness = 0
+        texture_heterogeneity = 0
+else:
+    texture_sharpness = 0
+    texture_heterogeneity = 0
+
+# 6. Автокорреляционные метрики
+# Одномерная автокорреляция (быстрый метод через FFT)
+if len(amp_values) > 100:
+    # Берем случайную выборку для скорости
+    sample_size = min(1000, len(amp_values))
+    sample_idx = np.random.choice(len(amp_values), sample_size, replace=False)
+    amp_sample = amp_values[sample_idx]
+
+    # Нормируем
+    amp_norm = (amp_sample - np.mean(amp_sample)) / (np.std(amp_sample) + 1e-10)
+
+    # Вычисляем автокорреляцию через FFT
+    autocorr = np.correlate(amp_norm, amp_norm, mode='full')
+    autocorr = autocorr[len(autocorr) // 2:]  # Берем только положительные лаги
+    autocorr = autocorr / autocorr[0]  # Нормируем
+
+    # Характеристики автокорреляции
+    # Ширина на уровне 0.5
+    try:
+        autocorr_width_idx = np.where(autocorr < 0.5)[0][0]
+        autocorr_width = autocorr_width_idx
+    except:
+        autocorr_width = len(autocorr)
+
+    # Энтропия автокорреляции
+    autocorr_norm = autocorr / np.sum(autocorr)
+    autocorr_entropy = -np.sum(autocorr_norm * np.log(autocorr_norm + 1e-10))
+else:
+    autocorr_width = 0
+    autocorr_entropy = 0
+
+# 7. Классификационные метрики
+# Коэффициент вариации
+cv = amp_std / amp_mean if amp_mean > 0 else 0
+
+# Отношение среднего к медиане (для выявления выбросов)
+
+СтерЖенёк(Ферритовый), [05.12.2025 1: 19]
+median_ratio = amp_mean / np.median(amp_values) if np.median(amp_values) > 0 else 1
+
+metrics = {
+    # Базовые статистики
+    'pixel_count': len(amp_values),
+    'area_pixels': np.sum(polygon_mask),
+    'amplitude_mean': float(amp_mean),
+    'amplitude_std': float(amp_std),
+    'amplitude_var': float(amp_var),
+    'amplitude_skew': float(amp_skew),
+    'amplitude_kurtosis': float(amp_kurtosis),
+
+    # Комплексные свойства
+    'circularity_ratio': float(circularity_ratio),
+    'cov_iq': float(cov_iq),
+    'var_i': float(var_i),
+    'var_q': float(var_q),
+
+    # Тесты распределений
+    'rayleigh_sigma': float(sigma_rayleigh),
+    'ks_test_pvalue': float(ks_pvalue),
+    'phase_uniformity_R': float(R),
+
+    # Пространственные метрики
+    'texture_sharpness': float(texture_sharpness),
+    'texture_heterogeneity': float(texture_heterogeneity),
+
+    # Автокорреляция
+    'autocorr_width': int(autocorr_width),
+    'autocorr_entropy': float(autocorr_entropy),
+
+    # Классификационные
+    'coefficient_of_variation': float(cv),
+    'mean_median_ratio': float(median_ratio),
+
+    # Производные метрики для классификации
+    'is_low_variance': float(cv < 0.1),
+    'is_high_circularity': float(circularity_ratio > 0.9),
+    'is_rayleigh_like': float(ks_pvalue > 0.05),  # Не отвергаем гипотезу о распределении Релея
+    'is_uniform_phase': float(R < 0.1),  # R близко к 0 для равномерного распределения
+}
+
+return metrics
+
+
+def analyze_all_polygons(radar_image_complex, polygons_masks):
+    """
+    Анализ всех полигонов и сохранение результатов.
+    """
+    amplitude_image = np.abs(radar_image_complex)
+
+    results = {}
+    for i, mask in enumerate(polygons_masks):
+        print(f"Анализ полигона {i + 1}...", end='\r')
+        metrics = compute_polygon_metrics(amplitude_image, radar_image_complex, mask)
+        if metrics:
+            results[f'polygon_{i + 1}'] = metrics
+
+            # Быстрая классификация по метрикам
+            if metrics['is_rayleigh_like'] and metrics['is_uniform_phase'] and metrics['is_high_circularity']:
+                results[f'polygon_{i + 1}']['predicted_class'] = 'Шум (АБГШ)'
+            elif metrics['coefficient_of_variation'] > 0.3 and metrics['texture_heterogeneity'] > 0.1:
+                results[f'polygon_{i + 1}']['predicted_class'] = 'Фон (растительность, город)'
+            elif metrics['amplitude_mean'] > 2 * np.mean(amplitude_image):
+                results[f'polygon_{i + 1}']['predicted_class'] = 'Цель/Отражение'
+            else:
+                results[f'polygon_{i + 1}']['predicted_class'] = 'Неизвестно'
+
+    print(f"\nАнализ завершен. Обработано {len(results)} полигонов.")
+    return results
+
+
+# Основная функция для использования
+def run_polygon_analysis(hdf5_path, json_path):
+    """
+    Полный цикл: загрузка, выделение полигонов, анализ.
+    """
+    # Загрузка данных (используем твои существующие функции)
+    radar_image_complex, radar_image = load_radar_image_from_hdf5(hdf5_path)
+
+    # Полуавтоматическое выделение полигонов
+    print("Начало выделения полигонов...")
+    polygons_masks = select_polygons_interactive(radar_image)
+
+    if not polygons_masks:
+        print("Полигоны не выделены. Использую автоматическое разбиение на сетку.")
+        # Автоматическое разбиение на 9 равных областей
+        h, w = radar_image.shape
+        polygons_masks = []
+        for i in range(3):
+            for j in range(3):
+                mask = np.zeros_like(radar_image, dtype=bool)
+                y_start = i * h // 3
+                y_end = (i + 1) * h // 3
+                x_start = j * w // 3
+                x_end = (j + 1) * w // 3
+
+
+СтерЖенёк(Ферритовый), [05.12.2025 1: 19]
+mask[y_start:y_end, x_start:x_end] = True
+polygons_masks.append(mask)
+
+# Анализ всех полигонов
+results = analyze_all_polygons(radar_image_complex, polygons_masks)
+
+# Сохранение результатов
+output_file = 'polygon_analysis_results.json'
+with open(output_file, 'w', encoding='utf-8') as f:
+    json.dump(results, f, indent=2, ensure_ascii=False, default=float)
+
+print(f"Результаты сохранены в {output_file}")
+
+# Быстрый отчет
+print("\n=== КРАТКИЙ ОТЧЕТ ===")
+for poly_name, metrics in results.items():
+    print(f"\n{poly_name}: {metrics['predicted_class']}")
+    print(f"  Площадь: {metrics['area_pixels']} пикселей")
+    print(f"  Средняя амплитуда: {metrics['amplitude_mean']:.2f}")
+    print(f"  Коэф. вариации: {metrics['coefficient_of_variation']:.3f}")
+    print(f"  R-тест фазы: {metrics['phase_uniformity_R']:.3f} "
+          f"{'(равномерно)' if metrics['is_uniform_phase'] else '(не равномерно)'}")
+    print(f"  K-S p-value: {metrics['ks_test_pvalue']:.3f} "
+          f"{'(Релей)' if metrics['is_rayleigh_like'] else '(не Релей)'}")
+
+return results
+
+
+# Пример использования в твоем main():
+def main():
+    # ... существующий код загрузки ...
+
+    # Анализ полигонов
+    polygon_results = run_polygon_analysis(HDF5_FILE_PATH, JSON_FILE_PATH)
+
+    # Используем результаты для улучшенного поиска шума
+    # Находим полигон, классифицированный как шум
+    noise_polygons = []
+    for poly_name, metrics in polygon_results.items():
+        if metrics.get('predicted_class') == 'Шум (АБГШ)':
+            # Получаем координаты полигона
+            # (здесь нужна доработка для получения маски из результатов)
+            pass
+
+    # ... остальной код ...
 ############
 # РАДИОМЕТРИЧЕСКИЙ АНАЛИЗ - ИСПРАВЛЕННЫЙ ФУНКЦИОНАЛ
 ############
