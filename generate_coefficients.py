@@ -2,7 +2,7 @@ import numpy as np
 
 def generate_coefficients(kernel_size, subsamples):
     coefficients = np.zeros((subsamples, kernel_size))
-
+    half_kernel_size = kernel_size // 2
     # Создаем окно Кайзера для уменьшения эффекта Гиббса
     window = np.kaiser(kernel_size, beta=2.5)
 
@@ -12,8 +12,7 @@ def generate_coefficients(kernel_size, subsamples):
 
         for k in range(kernel_size):
             # Позиция точки относительно центра интерполяции
-            # Центр ядра находится между точками при четном kernel_size
-            pos = (k - kernel_size // 2 + 0.5) - shift
+            pos = shift - (k - half_kernel_size)
 
             # Вычисляем sinc функцию
             if abs(pos) < 1e-12:
@@ -25,7 +24,6 @@ def generate_coefficients(kernel_size, subsamples):
             coefficients[phase, k] = sinc_val * window[k]
 
     # Нормализация коэффициентов (сумма = 1)
-    for phase in range(subsamples):
         sum_coeff = np.sum(coefficients[phase])
         if abs(sum_coeff) > 1e-12:
             coefficients[phase] /= sum_coeff
